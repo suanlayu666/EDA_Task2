@@ -8,6 +8,7 @@ static bool was_down;
 static TouchPoint last_point;
 static uint32_t last_scan_ms;
 
+/* 初始化触摸驱动和事件状态，返回是否已读到有效校准参数。 */
 bool TouchInput_Init(void)
 {
     was_down = false;
@@ -15,6 +16,7 @@ bool TouchInput_Init(void)
     return TP_InitWithoutCalibration() == 0;
 }
 
+/* 每隔 15 ms 扫描触摸，将坐标变化转换成按下、移动或抬起事件。 */
 bool TouchInput_Poll(bool raw, TouchEvent *event)
 {
     const uint32_t now = HAL_GetTick();

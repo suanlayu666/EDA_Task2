@@ -53,6 +53,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/sweep.c
     App/snake.c
     App/app.c
+    App/menu.c
     App/ui.c
     App/touch_input.c
 )

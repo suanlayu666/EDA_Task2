@@ -259,6 +259,7 @@ u8 TP_InitWithoutCalibration(void)
     return TP_Get_Adjdata() == 0;
 }
 
+/* 用四点样本拟合一条屏幕坐标轴的比例和偏移，拒绝不稳定的采样。 */
 static u8 FitCalibrationAxis(const u16 samples[4][2], u8 axis, u8 side,
                              u16 first, u16 last, float *scale, short *offset)
 {
@@ -287,6 +288,7 @@ static u8 FitCalibrationAxis(const u16 samples[4][2], u8 axis, u8 side,
     return 1;
 }
 
+/* 从四个原始触摸点求出坐标变换，通过校验后保存到 EEPROM。 */
 u8 TP_CalibrateFromPoints(const u16 samples[4][2],
                          u16 left, u16 top, u16 right, u16 bottom)
 {

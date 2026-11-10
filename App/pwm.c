@@ -4,7 +4,6 @@
 #include "tim.h"
 
 #define PWM_TIMER_CLOCK_HZ 168000000UL  /* TIM1 和 TIM8 共用的 APB2 定时器时钟，单位 Hz。 */
-#define PWM_MAX_HZ 200000U
 #define SYNC_B_DIVIDER_SCALE 3U
 
 typedef struct
@@ -13,6 +12,7 @@ typedef struct
     uint32_t counts;
 } PwmTiming;
 
+static bool extended_mode;
 static PwmTiming timing_a;
 static uint32_t frequency_a;
 static uint32_t frequency_b;
@@ -27,15 +27,39 @@ static uint32_t sync_b_compare;
 static bool sync_duty_pending;
 static bool sync_duty_requested;
 
+/* 返回当前量程。true 表示 500 kHz 扩展模式。 */
+bool Pwm_IsExtendedMode(void)
+{
+    return extended_mode;
+}
+
+/* 切换参数校验使用的量程，调用方负责把两路已有设定调整到新范围。 */
+void Pwm_SetExtendedMode(bool enabled)
+{
+    extended_mode = enabled;
+}
+
+/* 返回当前量程允许的最高频率，单位为 Hz。 */
+uint32_t Pwm_GetMaxFrequencyHz(void)
+{
+    return extended_mode ? PWM_EXTENDED_MAX_HZ : PWM_STANDARD_MAX_HZ;
+}
+
+/* 返回当前量程的占空比档位间隔，单位为百分点。 */
+uint32_t Pwm_GetDutyStepPercent(void)
+{
+    return extended_mode ? PWM_EXTENDED_DUTY_STEP_PERCENT : PWM_DUTY_STEP_PERCENT;
+}
+
 /*
  * 检查请求的频率和占空比能否使用。
- * frequency_hz 的单位是 Hz，范围为 1～200000。
+ * frequency_hz 的单位是 Hz，允许的上限随模式切换。
  * duty_percent 的单位是百分比，范围为 0～配置的占空比上限。
  * 两项都符合范围才返回 true。
  */
 static bool Pwm_Valid(uint32_t frequency_hz, uint32_t duty_percent)
 {
-    return frequency_hz != 0U && frequency_hz <= PWM_MAX_HZ &&
+    return frequency_hz != 0U && frequency_hz <= Pwm_GetMaxFrequencyHz() &&
            duty_percent <= PWM_DUTY_MAX_PERCENT;
 }
 

@@ -40,7 +40,8 @@ typedef enum
     UI_SET_B_DUTY,
     UI_TOGGLE_SYNC,
     UI_PHASE_DOWN,
-    UI_PHASE_UP
+    UI_PHASE_UP,
+    UI_TOGGLE_PWM_RANGE
 } UiAction;
 
 typedef enum
@@ -62,6 +63,7 @@ typedef enum
     UI_SNAKE_NONE
 } UiSnakeAction;
 
+void Ui_ResetPageState(void);
 void Ui_ShowSpwm(bool running, bool entering);
 bool Ui_SpwmTogglePressed(TouchEvent event);
 void Ui_ShowSweep(const SweepResult *result, bool entering, bool start_blocked);

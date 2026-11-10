@@ -14,6 +14,7 @@ static SnakeDirection pending_direction;
 static bool turn_pending;
 static uint32_t random_state;
 
+/* 从剩余空格中挑一格放置食物，由重开或吃到食物后调用。 */
 static void PlaceFood(void)
 {
     /* 在所有空格中选第 n 个，快填满时也只扫一遍。 */
@@ -29,6 +30,7 @@ static void PlaceFood(void)
     }
 }
 
+/* 按手动或自动模式重建棋盘、蛇身和方向，再生成第一份食物。 */
 void Snake_Reset(bool automatic, uint32_t seed)
 {
     memset(&game, 0, sizeof game);
@@ -53,6 +55,7 @@ void Snake_Reset(bool automatic, uint32_t seed)
     PlaceFood();
 }
 
+/* 记录下一步的手动方向，拒绝立即反向和同一步内的第二次转向。 */
 void Snake_SetDirection(SnakeDirection requested)
 {
     if (game.automatic || (game.status != SNAKE_READY && game.status != SNAKE_RUNNING) ||
@@ -66,6 +69,7 @@ void Snake_SetDirection(SnakeDirection requested)
     game.status = SNAKE_RUNNING;
 }
 
+/* 沿经过棋盘每一格的闭环计算下一个格子。 */
 static uint8_t AutoNextCell(void)
 {
     const unsigned int x = head % SNAKE_COLUMNS;
@@ -87,6 +91,7 @@ static uint8_t AutoNextCell(void)
     return head - 1U;
 }
 
+/* 应用已提交的方向并计算下一格，越界时返回 -1。 */
 static int ManualNextCell(void)
 {
     static const int dx[] = {0, 1, 0, -1};
@@ -103,6 +108,7 @@ static int ManualNextCell(void)
     return y * SNAKE_COLUMNS + x;
 }
 
+/* 前进一步，检查碰撞、更新蛇身和分数，并判断是否吃满棋盘。 */
 void Snake_Step(void)
 {
     if (game.status != SNAKE_RUNNING)
@@ -144,6 +150,7 @@ void Snake_Step(void)
     }
 }
 
+/* 返回供界面绘制的棋盘、分数和游戏状态。 */
 const SnakeState *Snake_GetState(void)
 {
     return &game;

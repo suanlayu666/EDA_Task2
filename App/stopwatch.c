@@ -13,6 +13,7 @@ static uint32_t start_tick;
 static uint32_t accumulated_ms;
 static StopwatchLap laps[STOPWATCH_LAP_CAPACITY];  /* 最新记录排在首位。 */
 
+/* 启动 TIM6 的周期中断，为秒表建立每毫秒递增一次的时间刻度。 */
 void Stopwatch_Init(void)
 {
     /* 清掉初始化留下的更新标志，等第一个完整周期再计入 1 ms。 */
@@ -26,11 +27,13 @@ void Stopwatch_OnPeriodElapsed(void)
     ++tick_ms;
 }
 
+/* 读取从 TIM6 启动起累计的毫秒刻度，供计算时间差和刷新间隔。 */
 uint32_t Stopwatch_GetTickMs(void)
 {
     return tick_ms;
 }
 
+/* 切换开始和暂停。暂停时累加本次运行时长，继续时记录新的起点。 */
 void Stopwatch_ToggleRunning(void)
 {
     const uint32_t now = Stopwatch_GetTickMs();
@@ -47,6 +50,7 @@ void Stopwatch_ToggleRunning(void)
     running = !running;
 }
 
+/* 停止秒表，清除累计时间和最近四圈记录。 */
 void Stopwatch_Reset(void)
 {
     running = false;
@@ -54,16 +58,19 @@ void Stopwatch_Reset(void)
     memset(laps, 0, sizeof laps);
 }
 
+/* 返回秒表的运行状态，供页面选择 START 或 PAUSE。 */
 bool Stopwatch_IsRunning(void)
 {
     return running;
 }
 
+/* 返回秒表已经累计的运行时间，单位为毫秒。 */
 uint32_t Stopwatch_GetElapsedMs(void)
 {
     return running ? accumulated_ms + (Stopwatch_GetTickMs() - start_tick) : accumulated_ms;
 }
 
+/* 运行时保存一次累计时间，并减去上一圈的累计值得到本段用时。 */
 void Stopwatch_RecordLap(void)
 {
     if (!running)
@@ -84,6 +91,7 @@ void Stopwatch_RecordLap(void)
     laps[0] = lap;
 }
 
+/* 返回最近四圈的只读记录，最新一圈在前，圈号为零的项为空。 */
 const StopwatchLap *Stopwatch_GetLaps(void)
 {
     return laps;

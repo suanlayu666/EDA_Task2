@@ -28,12 +28,14 @@ static uint32_t step_started_ms;
 static uint32_t settle_ms;
 static bool all_points_passed;
 
+/* 把以 Hz 表示的频率换算为向上取整的周期毫秒数。 */
 static uint32_t PeriodMs(uint32_t frequency_hz)
 {
     /* 不足 1 ms 的周期按 1 ms 计算，等待时间向上取整。 */
     return (1000U + frequency_hz - 1U) / frequency_hz;
 }
 
+/* 在 PWM 独立模式下启动十点扫频，清理旧结果并保存结束后要恢复的 A 路参数。 */
 bool Sweep_Start(uint32_t previous_frequency_hz, uint8_t previous_duty_percent)
 {
     if (Sweep_IsRunning() || Pwm_GetSyncState() != PWM_SYNC_OFF || previous_frequency_hz == 0U)
@@ -58,6 +60,7 @@ bool Sweep_Start(uint32_t previous_frequency_hz, uint8_t previous_duty_percent)
     return true;
 }
 
+/* 记录当前频点的结果并推进到下一点，最后一项结束后恢复 A 路原设定。 */
 static void FinishPoint(SweepPoint *point, SweepPointStatus status)
 {
     point->status = status;
@@ -75,6 +78,7 @@ static void FinishPoint(SweepPoint *point, SweepPointStatus status)
     }
 }
 
+/* 推进扫频的设频、等待、读取新样本和判定流程，每次调用只处理当前阶段。 */
 void Sweep_Task(uint32_t now_ms)
 {
     if (!Sweep_IsRunning())
@@ -124,11 +128,13 @@ void Sweep_Task(uint32_t now_ms)
     }
 }
 
+/* 返回扫频是否正在使用 A 路 PWM 输出。 */
 bool Sweep_IsRunning(void)
 {
     return sweep_result.status == SWEEP_RUNNING;
 }
 
+/* 返回只读扫频结果，包括逐点数据和总判定。 */
 const SweepResult *Sweep_GetResult(void)
 {
     return &sweep_result;

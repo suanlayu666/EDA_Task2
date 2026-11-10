@@ -1,6 +1,11 @@
 #ifndef SECOND_TASK_APP_CONFIG_H
 #define SECOND_TASK_APP_CONFIG_H
 
+/* 运行时在普通量程和扩展量程间切换。 */
+#define PWM_STANDARD_MAX_HZ 200000U
+#define PWM_EXTENDED_MAX_HZ 500000U
+#define PWM_EXTENDED_DUTY_STEP_PERCENT 5U
+
 /* PWM 页面允许设定的最大占空比，取值 1～100，单位为百分比。 */
 #define PWM_DUTY_MAX_PERCENT 100U
 
@@ -8,7 +13,7 @@
 #error "PWM_DUTY_MAX_PERCENT must be in the range 1 to 100"
 #endif
 
-/* 占空比每档相差的百分点。改这里可同时调整数字键盘和滑块。 */
+/* 普通模式下占空比每档相差的百分点。 */
 #define PWM_DUTY_STEP_PERCENT 1U
 
 #if PWM_DUTY_STEP_PERCENT < 1U || PWM_DUTY_STEP_PERCENT > 100U

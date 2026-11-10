@@ -11,6 +11,7 @@ static bool seen_rising;
 static uint32_t last_poll_ms;
 static CaptureResult capture_result;
 
+/* 在 PA0 启动 TIM5 的 PWM 输入捕获。上升沿捕获周期并清零，下降沿捕获高电平宽度。 */
 void Capture_Init(void)
 {
     /* TI1FP1 的上升沿先捕获周期，然后让 TIM5 从零开始数下一周期。 */
@@ -39,6 +40,7 @@ void Capture_Init(void)
     capture_started = true;
 }
 
+/* 按毫秒刻度轮询 TIM5，校验周期和脉宽，发布频率、占空比以及样本时刻。 */
 void Capture_Task(void)
 {
     const uint32_t now = HAL_GetTick();
@@ -91,6 +93,7 @@ void Capture_Task(void)
     capture_result.sample_ms = now;
 }
 
+/* 返回最近的测量结果。调用方先检查 valid，再使用测量值。 */
 const CaptureResult *Capture_GetResult(void)
 {
     return &capture_result;

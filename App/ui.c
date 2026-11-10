@@ -2,6 +2,7 @@
 #include "ui.h"
 
 #include "app_config.h"
+#include "pwm.h"
 #include "spwm.h"
 
 #include <stdio.h>
@@ -19,6 +20,10 @@ enum
     SLIDER_RIGHT = 211,
     SLIDER_Y = 222,
     KNOB_RADIUS = 10,
+    PWM_RANGE_X = 14,
+    PWM_RANGE_Y = 266,
+    PWM_RANGE_WIDTH = 120,
+    PWM_RANGE_HEIGHT = 38,
     KEY_LEFT = 14,
     KEY_TOP = 148,
     KEY_STEP_X = 72,
@@ -66,6 +71,7 @@ static const char *const key_labels[] =
 static EditField edit_field;
 static bool edit_channel_b;
 static bool main_visible;
+static bool drawn_extended_mode;
 static bool dragging;
 static int drag_offset;
 static uint32_t edit_value;
@@ -78,7 +84,14 @@ static bool drawn_stopwatch_running;
 static uint32_t drawn_stopwatch_ms;
 static uint32_t drawn_lap_number;
 static bool capture_visible;
-static bool drawn_capture_valid;
+typedef enum
+{
+    CAPTURE_WAITING,
+    CAPTURE_IN_RANGE,
+    CAPTURE_ABOVE_RANGE
+} CaptureDisplayState;
+
+static CaptureDisplayState drawn_capture_state;
 static char drawn_capture_frequency[18];
 static char drawn_capture_duty[18];
 
@@ -145,6 +158,18 @@ static const uint32_t title_bits[8][24] =
     },
 };
 
+/* 结束当前页面的键盘或滑块操作，并使绘图缓存失效。 */
+void Ui_ResetPageState(void)
+{
+    edit_field = EDIT_NONE;
+    dragging = false;
+    main_visible = false;
+    dual_pwm_visible = false;
+    stopwatch_visible = false;
+    capture_visible = false;
+}
+
+/* 设置前景色和背景色，在指定位置用 LCD 字库绘制单行文本。 */
 static void DrawText(uint16_t x, uint16_t y, uint16_t width, uint8_t size,
                      const char *text, uint16_t color, uint16_t background)
 {
@@ -153,6 +178,7 @@ static void DrawText(uint16_t x, uint16_t y, uint16_t width, uint8_t size,
     LCD_ShowString(x, y, width, size, size, (u8 *)text);
 }
 
+/* 绘制页面的中文编号和右侧功能名。 */
 static void DrawHeader(PageHeader page)
 {
     LCD_Fill(0, 0, tftlcd_data.width - 1, 45, HEADER_BG);
@@ -176,12 +202,14 @@ static void DrawHeader(PageHeader page)
     DrawText(153, 16, 72, 16, labels[page], WHITE, HEADER_BG);
 }
 
+/* 把占空比换算成滑块中心的横坐标。 */
 static int KnobPosition(uint8_t duty_percent)
 {
     const unsigned int width = SLIDER_RIGHT - SLIDER_LEFT;
     return SLIDER_LEFT + (width * duty_percent + PWM_DUTY_MAX_PERCENT / 2U) / PWM_DUTY_MAX_PERCENT;
 }
 
+/* 根据当前占空比重绘滑轨、已填充部分和滑块。 */
 static void DrawSlider(uint8_t duty_percent)
 {
     const int knob = KnobPosition(duty_percent);
@@ -192,6 +220,7 @@ static void DrawSlider(uint8_t duty_percent)
              knob + KNOB_RADIUS, SLIDER_Y + KNOB_RADIUS, ACCENT);
 }
 
+/* 进入时绘制 PWM 页，运行中仅刷新量程、频率、占空比及滑块的变化。 */
 void Ui_ShowPwm(PwmSettings settings)
 {
     dual_pwm_visible = false;
@@ -214,10 +243,23 @@ void Ui_ShowPwm(PwmSettings settings)
         char max_duty_label[5];
         (void)snprintf(max_duty_label, sizeof max_duty_label, "%u%%", (unsigned int)PWM_DUTY_MAX_PERCENT);
         DrawText(183, 243, 44, 16, max_duty_label, BLACK, PAGE_BG);
-        DrawText(14, 285, 210, 16, "PWM OUT PA11", HEADER_BG, PAGE_BG);
+        DrawText(142, 277, 88, 16, "OUT PA11", HEADER_BG, PAGE_BG);
     }
 
     char text[18];
+    const bool extended = Pwm_IsExtendedMode();
+    if (full_redraw || extended != drawn_extended_mode)
+    {
+        const uint16_t background = extended ? ACCENT : HEADER_BG;
+        LCD_Fill(PWM_RANGE_X, PWM_RANGE_Y, PWM_RANGE_X + PWM_RANGE_WIDTH - 1,
+                 PWM_RANGE_Y + PWM_RANGE_HEIGHT - 1, background);
+        (void)snprintf(text, sizeof text, "%s %luk/%lu%%", extended ? "EXT" : "STD",
+                       (unsigned long)(Pwm_GetMaxFrequencyHz() / 1000U),
+                       (unsigned long)Pwm_GetDutyStepPercent());
+        DrawText(24, 277, 104, 16, text, WHITE, background);
+        drawn_extended_mode = extended;
+    }
+
     if (full_redraw || settings.frequency_hz != drawn_settings.frequency_hz)
     {
         LCD_Fill(96, 88, 220, 120, WHITE);
@@ -236,6 +278,7 @@ void Ui_ShowPwm(PwmSettings settings)
     main_visible = true;
 }
 
+/* 仅刷新已显示的 PWM 页，避免后台参数更新盖住数字键盘。 */
 void Ui_RefreshPwm(PwmSettings settings)
 {
     if (main_visible)
@@ -244,6 +287,7 @@ void Ui_RefreshPwm(PwmSettings settings)
     }
 }
 
+/* 画出按钮背景，并在按钮范围内居中绘制标签。 */
 static void DrawButton(int x, int y, int width, int height,
                        const char *label, uint16_t background, uint16_t color)
 {
@@ -252,6 +296,7 @@ static void DrawButton(int x, int y, int width, int height,
     DrawText(text_x, y + (height - 16) / 2, width, 16, label, color, background);
 }
 
+/* 刷新键盘的暂存输入，校验失败时同时提示当前量程和步进。 */
 static void DrawEntry(bool invalid)
 {
     char text[18] = "_";
@@ -266,17 +311,20 @@ static void DrawEntry(bool invalid)
     LCD_Fill(85, 291, 225, 316, PAGE_BG);
     if (invalid)
     {
-        const char *hint = "Use 1-200000 Hz";
         if (edit_field == EDIT_DUTY)
         {
-            (void)snprintf(text, sizeof text, "Step %u%%, 0-%u%%",
-                           (unsigned int)PWM_DUTY_STEP_PERCENT, (unsigned int)PWM_DUTY_MAX_PERCENT);
-            hint = text;
+            (void)snprintf(text, sizeof text, "Step %lu%%, 0-%u%%",
+                           (unsigned long)Pwm_GetDutyStepPercent(), (unsigned int)PWM_DUTY_MAX_PERCENT);
         }
-        DrawText(86, 296, 137, 16, hint, RED, PAGE_BG);
+        else
+        {
+            (void)snprintf(text, sizeof text, "Use 1-%lu Hz", (unsigned long)Pwm_GetMaxFrequencyHz());
+        }
+        DrawText(86, 296, 137, 16, text, RED, PAGE_BG);
     }
 }
 
+/* 为指定页面和通道打开数字键盘，显示当前有效值并清空待提交值。 */
 static void OpenKeyboard(EditField field, PwmSettings settings, PageHeader page, bool channel_b)
 {
     edit_field = field;
@@ -319,6 +367,7 @@ static void OpenKeyboard(EditField field, PwmSettings settings, PageHeader page,
     DrawButton(14, 291, 66, 26, "BACK", HEADER_BG, WHITE);
 }
 
+/* 处理数字、删除、确认和返回；校验成功后才通过 value 返回新设定。 */
 static UiAction HandleKeyboard(TouchPoint point, uint32_t *value)
 {
     if (point.x >= 14U && point.x < 80U && point.y >= 291U && point.y < 317U)
@@ -340,9 +389,9 @@ static UiAction HandleKeyboard(TouchPoint point, uint32_t *value)
     if (key == 11)
     {
         const bool frequency = edit_field == EDIT_FREQUENCY;
-        if (edit_digits == 0U || (frequency && (edit_value == 0U || edit_value > 200000U)) ||
+        if (edit_digits == 0U || (frequency && (edit_value == 0U || edit_value > Pwm_GetMaxFrequencyHz())) ||
             (!frequency && (edit_value > PWM_DUTY_MAX_PERCENT ||
-                            (edit_value != PWM_DUTY_MAX_PERCENT && edit_value % PWM_DUTY_STEP_PERCENT != 0U))))
+                            (edit_value != PWM_DUTY_MAX_PERCENT && edit_value % Pwm_GetDutyStepPercent() != 0U))))
         {
             DrawEntry(true);
             return UI_NO_CHANGE;
@@ -370,6 +419,7 @@ static UiAction HandleKeyboard(TouchPoint point, uint32_t *value)
     return UI_NO_CHANGE;
 }
 
+/* 识别单路 PWM 页的键盘、量程切换和滑块操作，返回对应动作。 */
 UiAction Ui_HandleTouch(TouchEvent event, PwmSettings settings, uint32_t *value)
 {
     if (edit_field != EDIT_NONE)
@@ -404,6 +454,13 @@ UiAction Ui_HandleTouch(TouchEvent event, PwmSettings settings, uint32_t *value)
             }
         }
 
+        if (point.x >= PWM_RANGE_X && point.x < PWM_RANGE_X + PWM_RANGE_WIDTH &&
+            point.y >= PWM_RANGE_Y && point.y < PWM_RANGE_Y + PWM_RANGE_HEIGHT)
+        {
+            dragging = false;
+            return UI_TOGGLE_PWM_RANGE;
+        }
+
         const int knob = KnobPosition(settings.duty_percent);
         const int offset = point.x - knob;
         if (offset >= -14 && offset <= 14 && point.y >= SLIDER_Y - 14 && point.y <= SLIDER_Y + 14)
@@ -433,8 +490,9 @@ UiAction Ui_HandleTouch(TouchEvent event, PwmSettings settings, uint32_t *value)
             /* 比较手指到相邻两档的距离，最后一档使用配置的上限。 */
             const unsigned int width = SLIDER_RIGHT - SLIDER_LEFT;
             const unsigned int position = (unsigned int)(x - SLIDER_LEFT) * PWM_DUTY_MAX_PERCENT;
-            const unsigned int lower = position / (width * PWM_DUTY_STEP_PERCENT) * PWM_DUTY_STEP_PERCENT;
-            unsigned int upper = lower + PWM_DUTY_STEP_PERCENT;
+            const unsigned int step = Pwm_GetDutyStepPercent();
+            const unsigned int lower = position / (width * step) * step;
+            unsigned int upper = lower + step;
             if (upper > PWM_DUTY_MAX_PERCENT)
             {
                 upper = PWM_DUTY_MAX_PERCENT;
@@ -449,6 +507,7 @@ UiAction Ui_HandleTouch(TouchEvent event, PwmSettings settings, uint32_t *value)
     return UI_NO_CHANGE;
 }
 
+/* 显示四个触摸校准目标，失败时提示重新按顺序点选。 */
 void Ui_ShowCalibration(const TouchPoint targets[4], bool retry)
 {
     LCD_Clear(WHITE);
@@ -464,11 +523,13 @@ void Ui_ShowCalibration(const TouchPoint targets[4], bool retry)
     }
 }
 
+/* 擦除已经采样的目标，引导用户点下一个校准点。 */
 void Ui_RemoveCalibrationTarget(TouchPoint target)
 {
     LCD_Fill(target.x - 18, target.y - 18, target.x + 18, target.y + 18, WHITE);
 }
 
+/* 把累计毫秒格式化为分、秒、毫秒，供主读数和圈记录复用。 */
 static void FormatStopwatchTime(char text[STOPWATCH_TIME_TEXT_SIZE], uint32_t elapsed_ms)
 {
     (void)snprintf(text, STOPWATCH_TIME_TEXT_SIZE, "%02lu:%02lu.%03lu",
@@ -477,6 +538,7 @@ static void FormatStopwatchTime(char text[STOPWATCH_TIME_TEXT_SIZE], uint32_t el
                    (unsigned long)(elapsed_ms % 1000U));
 }
 
+/* 清理旧圈记录区，按从新到旧的顺序绘制圈号、累计时间和本段用时。 */
 static void DrawStopwatchLaps(const StopwatchLap laps[STOPWATCH_LAP_CAPACITY])
 {
     LCD_Fill(14, 230, 225, 312, PAGE_BG);
@@ -493,6 +555,7 @@ static void DrawStopwatchLaps(const StopwatchLap laps[STOPWATCH_LAP_CAPACITY])
     }
 }
 
+/* 进入时画秒表布局，之后按需更新读数、按钮和最近四圈。 */
 void Ui_ShowStopwatch(uint32_t elapsed_ms, bool running,
                       const StopwatchLap laps[STOPWATCH_LAP_CAPACITY])
 {
@@ -546,6 +609,7 @@ void Ui_ShowStopwatch(uint32_t elapsed_ms, bool running,
     }
 }
 
+/* 在按下时识别 START/PAUSE、LAP 或 RESET。 */
 UiStopwatchAction Ui_HandleStopwatchTouch(TouchEvent event)
 {
     const TouchPoint point = event.point;
@@ -570,6 +634,7 @@ UiStopwatchAction Ui_HandleStopwatchTouch(TouchEvent event)
     return UI_STOPWATCH_NONE;
 }
 
+/* 当前文本发生变化时，先清掉旧测量值，再画新值。 */
 static void DrawCaptureValue(uint16_t y, const char *text, char *previous, bool entering)
 {
     if (entering || strcmp(text, previous) != 0)
@@ -581,6 +646,7 @@ static void DrawCaptureValue(uint16_t y, const char *text, char *previous, bool 
     }
 }
 
+/* 显示 PA0 的实测值和信号状态，读数失效或超量程时用占位符。 */
 void Ui_ShowCapture(const CaptureResult *result)
 {
     dual_pwm_visible = false;
@@ -593,16 +659,27 @@ void Ui_ShowCapture(const CaptureResult *result)
 
         LCD_Clear(PAGE_BG);
         DrawHeader(HEADER_CAPTURE);
-        DrawText(14, 56, 210, 16, "INPUT PA0", HEADER_BG, PAGE_BG);
+        DrawText(14, 56, 80, 16, "INPUT PA0", HEADER_BG, PAGE_BG);
+        char limit[16];
+        (void)snprintf(limit, sizeof limit, "MAX %lu Hz", (unsigned long)Pwm_GetMaxFrequencyHz());
+        DrawText(115, 56, 112, 16, limit, HEADER_BG, PAGE_BG);
         LCD_Fill(14, 83, 225, 123, WHITE);
         LCD_Fill(14, 135, 225, 175, WHITE);
         DrawText(24, 95, 72, 16, "Freq", BLACK, WHITE);
         DrawText(24, 147, 72, 16, "Duty", BLACK, WHITE);
     }
 
+    CaptureDisplayState state = CAPTURE_WAITING;
+    if (result->valid)
+    {
+        /* 上限附近留出题目规定的 1% 频率误差，避免误报超量程。 */
+        const float limit = 1.01f * (float)Pwm_GetMaxFrequencyHz();
+        state = result->frequency_hz <= limit ? CAPTURE_IN_RANGE : CAPTURE_ABOVE_RANGE;
+    }
+
     char frequency[sizeof drawn_capture_frequency] = "--- Hz";
     char duty[sizeof drawn_capture_duty] = "--- %";
-    if (result->valid)
+    if (state == CAPTURE_IN_RANGE)
     {
         /* 低频保留三位小数，方便看出 1 Hz 附近的变化。 */
         if (result->frequency_hz < 1000.0f)
@@ -632,15 +709,16 @@ void Ui_ShowCapture(const CaptureResult *result)
     /* 数值未变就保留原来的像素，信号丢失时用占位符覆盖旧读数。 */
     DrawCaptureValue(92, frequency, drawn_capture_frequency, entering);
     DrawCaptureValue(144, duty, drawn_capture_duty, entering);
-    if (entering || result->valid != drawn_capture_valid)
+    if (entering || state != drawn_capture_state)
     {
+        static const char *const status[] = {"WAITING FOR SIGNAL", "SIGNAL OK", "ABOVE RANGE"};
         LCD_Fill(14, 195, 225, 221, PAGE_BG);
-        DrawText(14, 200, 210, 16, result->valid ? "SIGNAL OK" : "WAITING FOR SIGNAL",
-                 HEADER_BG, PAGE_BG);
-        drawn_capture_valid = result->valid;
+        DrawText(14, 200, 210, 16, status[state], state == CAPTURE_ABOVE_RANGE ? RED : HEADER_BG, PAGE_BG);
+        drawn_capture_state = state;
     }
 }
 
+/* 按需绘制一路 PWM 的频率、占空比和对应的编辑区域。 */
 static void DrawDualPwmChannel(int x, PwmSettings settings, PwmSettings previous, bool entering)
 {
     char text[18];
@@ -656,6 +734,7 @@ static void DrawDualPwmChannel(int x, PwmSettings settings, PwmSettings previous
     }
 }
 
+/* 绘制增加或减少一档相位的按钮，补画度数符号。 */
 static void DrawPhaseButton(int x, char sign)
 {
     char text[6];
@@ -668,6 +747,7 @@ static void DrawPhaseButton(int x, char sign)
     LCD_Draw_Circle(degree_x, DUAL_CONTROL_Y + 13, 2);
 }
 
+/* 绘制双路 PWM 页面，按需更新两路参数、相位和同步提示。 */
 void Ui_ShowDualPwm(const DualPwmSettings *settings)
 {
     const bool entering = !dual_pwm_visible;
@@ -720,6 +800,7 @@ void Ui_ShowDualPwm(const DualPwmSettings *settings)
     drawn_dual_pwm = *settings;
 }
 
+/* 仅在双路 PWM 主页面可见时刷新，保留正在操作的数字键盘。 */
 void Ui_RefreshDualPwm(const DualPwmSettings *settings)
 {
     /* 运行状态变化时刷新主页，用户正在输入的数字留在键盘上。 */
@@ -729,6 +810,7 @@ void Ui_RefreshDualPwm(const DualPwmSettings *settings)
     }
 }
 
+/* 把双路 PWM 页触摸转换为通道编辑、同步或调相动作。 */
 UiAction Ui_HandleDualPwmTouch(TouchEvent event, const DualPwmSettings *settings, uint32_t *value)
 {
     if (event.type != TOUCH_DOWN)
@@ -812,6 +894,7 @@ static const SnakeButton snake_buttons[] =
     { 177, 4, 56, 26, "RESET", UI_SNAKE_RESET }
 };
 
+/* 绘制游戏页，移动时只更新变化的格子、分数和状态。 */
 void Ui_ShowSnake(const SnakeState *game, bool entering)
 {
     static SnakeState drawn_game;
@@ -869,6 +952,7 @@ void Ui_ShowSnake(const SnakeState *game, bool entering)
     drawn_game = *game;
 }
 
+/* 查找按下位置对应的方向、模式或重开按钮。 */
 UiSnakeAction Ui_HandleSnakeTouch(TouchEvent event)
 {
     if (event.type != TOUCH_DOWN)
@@ -898,6 +982,7 @@ enum
     SWEEP_ROW_HEIGHT = 17,
 };
 
+/* 绘制单个频点的设定值、实测值和误差或失败原因。 */
 static void DrawSweepRow(const SweepPoint *point, unsigned int row)
 {
     const uint16_t y = SWEEP_ROW_Y + row * SWEEP_ROW_HEIGHT;
@@ -950,6 +1035,7 @@ static void DrawSweepRow(const SweepPoint *point, unsigned int row)
     DrawText(173, y + 2, 54, 12, error, color, background);
 }
 
+/* 进入时绘制扫频表，运行中补画测完的频点并更新总判定。 */
 void Ui_ShowSweep(const SweepResult *result, bool entering, bool start_blocked)
 {
     static uint8_t drawn_completed;
@@ -993,6 +1079,7 @@ void Ui_ShowSweep(const SweepResult *result, bool entering, bool start_blocked)
     drawn_blocked = start_blocked;
 }
 
+/* 判断本次触摸是否按下扫频的 START 按钮。 */
 bool Ui_SweepStartPressed(TouchEvent event)
 {
     return event.type == TOUCH_DOWN &&

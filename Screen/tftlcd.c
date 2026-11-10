@@ -171,6 +171,7 @@ void LCD_WriteData(u16 data)
 #endif
 }
 
+/* 先选择 LCD 寄存器，再写入该寄存器的数据。 */
 void LCD_WriteCmdData(u16 cmd,u16 data)
 {
 	LCD_WriteCmd(cmd);
@@ -178,6 +179,7 @@ void LCD_WriteCmdData(u16 cmd,u16 data)
 }
 
 
+/* 把 RGB565 颜色分量移到 18 位并行接口所需的位置。 */
 u32 LCD_RGBColor_Change(u16 color)
 {
 	u8 r,g,b=0;
@@ -188,6 +190,7 @@ u32 LCD_RGBColor_Change(u16 color)
 	
 	return ((r<<13)|(g<<6)|(b<<1));
 }
+/* 按当前 LCD 控制器的总线格式写入一个像素颜色。 */
 void LCD_WriteData_Color(u16 color)
 {
 #ifdef TFTLCD_HX8357D
@@ -1311,6 +1314,7 @@ void LCD_SSD_BackLightSet(u8 pwm)
 	LCD_WriteData(0x00);	//6设置F
 }
 
+/* 在 GPIO 和 FSMC 就绪后，初始化选定的 LCD 控制器并设置显示方向。 */
 void TFTLCD_Init(void)
 {
 	u16 i;
@@ -3711,6 +3715,7 @@ void LCD_DrawLine(u16 x1, u16 y1, u16 x2, u16 y2)
 	}  
 } 
 
+/* 用指定颜色从起点画到终点。 */
 void LCD_DrawLine_Color(u16 x1, u16 y1, u16 x2, u16 y2,u16 color)
 {
 	u16 t; 
@@ -3947,6 +3952,7 @@ void LCD_ShowString(u16 x,u16 y,u16 width,u16 height,u8 size,u8 *p)
 ****************************************************************************/
 /* 此适配版仅包含ASCII字库；中文显示需另行添加。 */
 
+/* 把 RGB565 像素按顺序写入指定的矩形区域。 */
 void LCD_ShowPicture(u16 x, u16 y, u16 wide, u16 high,u8 *pic)
 {
 	u16 temp = 0;

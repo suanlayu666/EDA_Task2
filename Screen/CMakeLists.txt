@@ -4,7 +4,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     touch.c
     iic.c
     24cxx.c
-    screen_demo.c
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE

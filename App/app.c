@@ -3,6 +3,7 @@
 #include "app_config.h"
 #include "capture.h"
 #include "main.h"
+#include "menu.h"
 #include "pwm.h"
 #include "snake.h"
 #include "spwm.h"
@@ -18,6 +19,7 @@
 
 typedef enum
 {
+    PAGE_MENU,
     PAGE_PWM,
     PAGE_STOPWATCH,
     PAGE_CAPTURE,
@@ -48,7 +50,7 @@ static PwmSettings pending_pwm_a;
 static PwmSettings pending_pwm_b;
 static bool sync_needs_match;
 static bool calibrated;
-static AppPage current_page = PAGE_PWM;
+static AppPage current_page = PAGE_MENU;
 static TouchPoint calibration_targets[4];
 static uint16_t calibration_samples[4][2];
 static uint8_t calibration_index;
@@ -58,7 +60,7 @@ static uint32_t last_snake_step_ms;
 static bool sweep_start_blocked;
 
 /*
- * 读取 KEY0 并做 20 ms 消抖。确认一次新的按下时返回 true，用于切换功能页。
+ * 读取 KEY0 并做 20 ms 消抖。确认一次新的按下时返回 true，用于返回功能菜单。
  */
 static bool Key0_Pressed(void)
 {
@@ -83,9 +85,57 @@ static bool Key0_Pressed(void)
     return false;
 }
 
-/*
- * 开机时调用一次。提交并启动 A、B 路 PWM，随后启动秒表、输入捕获和触摸屏。
- */
+/* 返回菜单前结束页面编辑，保证再次打开原功能时会重绘整页。 */
+static void App_ShowMenu(void)
+{
+    Ui_ResetPageState();
+    current_page = PAGE_MENU;
+    Menu_Show();
+}
+
+/* 将菜单选项交给已有页面入口，并为定期刷新的页面重新记录起点。 */
+static void App_OpenMenuItem(MenuItem item)
+{
+    switch (item)
+    {
+        case MENU_PWM:
+            current_page = PAGE_PWM;
+            Ui_ShowPwm(dual_pwm.a);
+            break;
+        case MENU_STOPWATCH:
+            current_page = PAGE_STOPWATCH;
+            last_stopwatch_refresh_ms = Stopwatch_GetTickMs();
+            Ui_ShowStopwatch(Stopwatch_GetElapsedMs(), Stopwatch_IsRunning(), Stopwatch_GetLaps());
+            break;
+        case MENU_CAPTURE:
+            current_page = PAGE_CAPTURE;
+            Ui_ShowCapture(Capture_GetResult());
+            last_capture_refresh_ms = HAL_GetTick();
+            break;
+        case MENU_DUAL_PWM:
+            current_page = PAGE_DUAL_PWM;
+            Ui_ShowDualPwm(&dual_pwm);
+            break;
+        case MENU_SWEEP:
+            current_page = PAGE_SWEEP;
+            sweep_start_blocked = false;
+            Ui_ShowSweep(Sweep_GetResult(), true, false);
+            break;
+        case MENU_SPWM:
+            current_page = PAGE_SPWM;
+            Ui_ShowSpwm(Spwm_IsRunning(), true);
+            break;
+        case MENU_SNAKE:
+            current_page = PAGE_SNAKE;
+            last_snake_step_ms = HAL_GetTick();
+            Ui_ShowSnake(Snake_GetState(), true);
+            break;
+        case MENU_NONE:
+            break;
+    }
+}
+
+/* 启动外设和应用模块，触摸校准就绪后显示功能菜单。 */
 void App_Init(void)
 {
     /* 先提交符合上限的开机参数，再开启 PA11 输出。 */
@@ -111,7 +161,7 @@ void App_Init(void)
 
     if (calibrated)
     {
-        Ui_ShowPwm(dual_pwm.a);
+        App_ShowMenu();
         return;
     }
 
@@ -176,20 +226,11 @@ static void PwmApplySettings(bool channel_b, PwmSettings requested)
 }
 
 /* 修改频率时如果仍在同步，先退出，再交给主循环提交参数。 */
-static void PwmEditSettings(bool channel_b, bool edit_frequency, uint32_t value)
+static void PwmSubmitSettings(bool channel_b, PwmSettings requested)
 {
     const PwmSyncState sync = Pwm_GetSyncState();
     const PwmSettings current = channel_b ? dual_pwm.b : dual_pwm.a;
     PwmSettings *pending = channel_b ? &pending_pwm_b : &pending_pwm_a;
-    PwmSettings requested = pending->frequency_hz != 0U ? *pending : current;
-    if (edit_frequency)
-    {
-        requested.frequency_hz = value;
-    }
-    else
-    {
-        requested.duty_percent = (uint8_t)value;
-    }
 
     if (sync != PWM_SYNC_OFF && requested.frequency_hz != current.frequency_hz)
     {
@@ -204,6 +245,49 @@ static void PwmEditSettings(bool channel_b, bool edit_frequency, uint32_t value)
     else
     {
         PwmApplySettings(channel_b, requested);
+    }
+}
+
+/* 保留另一项参数，只替换本次编辑的频率或占空比，再提交给对应通道。 */
+static void PwmEditSettings(bool channel_b, bool edit_frequency, uint32_t value)
+{
+    const PwmSettings current = channel_b ? dual_pwm.b : dual_pwm.a;
+    const PwmSettings pending = channel_b ? pending_pwm_b : pending_pwm_a;
+    PwmSettings requested = pending.frequency_hz != 0U ? pending : current;
+    if (edit_frequency)
+    {
+        requested.frequency_hz = value;
+    }
+    else
+    {
+        requested.duty_percent = (uint8_t)value;
+    }
+    PwmSubmitSettings(channel_b, requested);
+}
+
+/* 切换量程后将该通道频率限制在新上限内，并把占空比对齐到最近档。 */
+static void PwmAdjustToRange(bool channel_b)
+{
+    const PwmSettings current = channel_b ? dual_pwm.b : dual_pwm.a;
+    const PwmSettings pending = channel_b ? pending_pwm_b : pending_pwm_a;
+    PwmSettings requested = pending.frequency_hz != 0U ? pending : current;
+    const uint32_t maximum_hz = Pwm_GetMaxFrequencyHz();
+    if (requested.frequency_hz > maximum_hz)
+    {
+        requested.frequency_hz = maximum_hz;
+    }
+
+    /* 占空比吸附到最近档，最后一档始终允许取配置的上限。 */
+    const uint32_t step = Pwm_GetDutyStepPercent();
+    const uint32_t duty = requested.duty_percent;
+    const uint32_t lower = duty / step * step;
+    const uint32_t upper = lower + step <= PWM_DUTY_MAX_PERCENT ? lower + step : PWM_DUTY_MAX_PERCENT;
+    requested.duty_percent = (uint8_t)(duty - lower < upper - duty ? lower : upper);
+
+    if (pending.frequency_hz != 0U ||
+        requested.frequency_hz != current.frequency_hz || requested.duty_percent != current.duty_percent)
+    {
+        PwmSubmitSettings(channel_b, requested);
     }
 }
 
@@ -264,6 +348,7 @@ static void DualPwm_HandleTouch(TouchEvent event)
     switch (Ui_HandleDualPwmTouch(event, &dual_pwm, &value))
     {
         case UI_NO_CHANGE:
+        case UI_TOGGLE_PWM_RANGE:
             return;
         case UI_CANCEL_EDIT:
             break;
@@ -319,6 +404,7 @@ static void DualPwm_HandleTouch(TouchEvent event)
     Ui_ShowDualPwm(&dual_pwm);
 }
 
+/* 处理方向、重开和自动模式按钮，按当前速度推进游戏并刷新变化的格子。 */
 static void SnakePage_Task(void)
 {
     const uint32_t now = HAL_GetTick();
@@ -355,6 +441,7 @@ static void SnakePage_Task(void)
     }
 }
 
+/* 处理扫频启动按钮和拒绝提示，并把后台状态机的最新结果交给扫频页显示。 */
 static void SweepPage_Task(void)
 {
     TouchEvent event;
@@ -410,45 +497,10 @@ void App_Task(void)
     Capture_Task();
     Sweep_Task(HAL_GetTick());
 
-    /* KEY0 依次切换功能一至功能六，最后进入贪吃蛇。 */
-    if (calibrated && Key0_Pressed())
+    /* KEY0 在任一功能页返回菜单。菜单中也继续采样实体按键状态。 */
+    if (calibrated && Key0_Pressed() && current_page != PAGE_MENU)
     {
-        switch (current_page)
-        {
-            case PAGE_PWM:
-                current_page = PAGE_STOPWATCH;
-                last_stopwatch_refresh_ms = Stopwatch_GetTickMs();
-                Ui_ShowStopwatch(Stopwatch_GetElapsedMs(), Stopwatch_IsRunning(), Stopwatch_GetLaps());
-                break;
-            case PAGE_STOPWATCH:
-                current_page = PAGE_CAPTURE;
-                Ui_ShowCapture(Capture_GetResult());
-                last_capture_refresh_ms = HAL_GetTick();
-                break;
-            case PAGE_CAPTURE:
-                current_page = PAGE_DUAL_PWM;
-                Ui_ShowDualPwm(&dual_pwm);
-                break;
-            case PAGE_DUAL_PWM:
-                current_page = PAGE_SWEEP;
-                sweep_start_blocked = false;
-                Ui_ShowSweep(Sweep_GetResult(), true, false);
-                break;
-            case PAGE_SWEEP:
-                current_page = PAGE_SPWM;
-                /* 进入功能六时显示 SPWM 的实际开关状态。 */
-                Ui_ShowSpwm(Spwm_IsRunning(), true);
-                break;
-            case PAGE_SPWM:
-                current_page = PAGE_SNAKE;
-                last_snake_step_ms = HAL_GetTick();
-                Ui_ShowSnake(Snake_GetState(), true);
-                break;
-            case PAGE_SNAKE:
-                current_page = PAGE_PWM;
-                Ui_ShowPwm(dual_pwm.a);
-                break;
-        }
+        App_ShowMenu();
         return;
     }
 
@@ -512,7 +564,7 @@ void App_Task(void)
 
                 if (calibrated)
                 {
-                    Ui_ShowPwm(dual_pwm.a);
+                    App_ShowMenu();
                 }
                 else
                 {
@@ -521,6 +573,12 @@ void App_Task(void)
                 }
             }
         }
+        return;
+    }
+
+    if (current_page == PAGE_MENU)
+    {
+        App_OpenMenuItem(Menu_HandleTouch(event));
         return;
     }
 
@@ -544,6 +602,15 @@ void App_Task(void)
         return;
     }
 
-    PwmEditSettings(false, action == UI_SET_FREQUENCY, value);
+    if (action == UI_TOGGLE_PWM_RANGE)
+    {
+        Pwm_SetExtendedMode(!Pwm_IsExtendedMode());
+        PwmAdjustToRange(false);
+        PwmAdjustToRange(true);
+    }
+    else
+    {
+        PwmEditSettings(false, action == UI_SET_FREQUENCY, value);
+    }
     Ui_ShowPwm(dual_pwm.a);
 }
