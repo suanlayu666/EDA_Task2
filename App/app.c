@@ -23,8 +23,8 @@ typedef enum
     PAGE_CAPTURE,
     PAGE_DUAL_PWM,
     PAGE_SWEEP,
-    PAGE_SNAKE,
-    PAGE_SPWM
+    PAGE_SPWM,
+    PAGE_SNAKE
 } AppPage;
 
 /* 开机占空比以 50% 为基准，按步进取整，再限制在上限内。 */
@@ -410,7 +410,7 @@ void App_Task(void)
     Capture_Task();
     Sweep_Task(HAL_GetTick());
 
-    /* KEY0 在各功能页之间循环，SPWM 页放在贪吃蛇后面。 */
+    /* KEY0 依次切换功能一至功能六，最后进入贪吃蛇。 */
     if (calibrated && Key0_Pressed())
     {
         switch (current_page)
@@ -435,16 +435,16 @@ void App_Task(void)
                 Ui_ShowSweep(Sweep_GetResult(), true, false);
                 break;
             case PAGE_SWEEP:
+                current_page = PAGE_SPWM;
+                /* 进入功能六时显示 SPWM 的实际开关状态。 */
+                Ui_ShowSpwm(Spwm_IsRunning(), true);
+                break;
+            case PAGE_SPWM:
                 current_page = PAGE_SNAKE;
                 last_snake_step_ms = HAL_GetTick();
                 Ui_ShowSnake(Snake_GetState(), true);
                 break;
             case PAGE_SNAKE:
-                current_page = PAGE_SPWM;
-                /* 进入页面时显示实际开关状态。 */
-                Ui_ShowSpwm(Spwm_IsRunning(), true);
-                break;
-            case PAGE_SPWM:
                 current_page = PAGE_PWM;
                 Ui_ShowPwm(dual_pwm.a);
                 break;

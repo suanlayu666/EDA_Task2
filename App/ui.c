@@ -88,11 +88,12 @@ typedef enum
     HEADER_STOPWATCH,
     HEADER_CAPTURE,
     HEADER_DUAL_PWM,
-    HEADER_SWEEP
+    HEADER_SWEEP,
+    HEADER_SPWM
 } PageHeader;
 
-/* “功、能、一、二、三、四、五”的固定字模，由现有 LCD 绘图接口显示。 */
-static const uint32_t title_bits[7][24] =
+/* “功、能、一、二、三、四、五、六”的固定字模，由现有 LCD 绘图接口显示。 */
+static const uint32_t title_bits[8][24] =
 {
     {
         0x000100U, 0x000300U, 0x000300U, 0x7FC300U, 0x7FC300U, 0x061FFCU,
@@ -136,6 +137,12 @@ static const uint32_t title_bits[7][24] =
         0x0C0030U, 0x180030U, 0x180060U, 0x180060U, 0x300060U, 0x3000C0U,
         0x3000C0U, 0x7FFFFEU, 0x7FFFFEU, 0x000000U, 0x000000U, 0x000000U,
     },
+    {
+        0x000000U, 0x000000U, 0x003000U, 0x001800U, 0x001800U, 0x000C00U,
+        0x000000U, 0x3FFFFCU, 0x3FFFFCU, 0x000000U, 0x000000U, 0x00C300U,
+        0x00C300U, 0x018180U, 0x018180U, 0x0300C0U, 0x0300C0U, 0x060060U,
+        0x060030U, 0x0C0030U, 0x180018U, 0x000000U, 0x000000U, 0x000000U,
+    },
 };
 
 static void DrawText(uint16_t x, uint16_t y, uint16_t width, uint8_t size,
@@ -165,7 +172,7 @@ static void DrawHeader(PageHeader page)
             }
         }
     }
-    static const char *const labels[] = {"PWM", "STOPWATCH", "CAPTURE", "DUAL PWM", "SWEEP"};
+    static const char *const labels[] = {"PWM", "STOPWATCH", "CAPTURE", "DUAL PWM", "SWEEP", "SPWM"};
     DrawText(153, 16, 72, 16, labels[page], WHITE, HEADER_BG);
 }
 
@@ -1014,8 +1021,7 @@ void Ui_ShowSpwm(bool running, bool entering)
         dragging = false;
 
         LCD_Clear(PAGE_BG);
-        LCD_Fill(0, 0, tftlcd_data.width - 1, 45, HEADER_BG);
-        DrawText(14, 11, 210, 24, "SPWM", WHITE, HEADER_BG);
+        DrawHeader(HEADER_SPWM);
         DrawText(14, 57, 210, 16, "TIM2 CH4  /  PA3", HEADER_BG, PAGE_BG);
 
         char label[24];
