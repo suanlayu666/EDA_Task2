@@ -32,7 +32,19 @@ enum
     STOPWATCH_BUTTON_Y = 150,
     STOPWATCH_BUTTON_WIDTH = 66,
     STOPWATCH_BUTTON_HEIGHT = 44,
-    STOPWATCH_TIME_TEXT_SIZE = 13
+    STOPWATCH_TIME_TEXT_SIZE = 13,
+    DUAL_A_X = 14,
+    DUAL_B_X = 126,
+    DUAL_VALUE_WIDTH = 100,
+    DUAL_VALUE_HEIGHT = 36,
+    DUAL_FREQUENCY_Y = 82,
+    DUAL_DUTY_Y = 133,
+    DUAL_PHASE_DOWN_X = 14,
+    DUAL_SYNC_X = 87,
+    DUAL_PHASE_UP_X = 160,
+    DUAL_CONTROL_Y = 226,
+    DUAL_CONTROL_WIDTH = 66,
+    DUAL_CONTROL_HEIGHT = 36
 };
 
 typedef enum
@@ -51,12 +63,15 @@ static const char *const key_labels[] =
 };
 
 static EditField edit_field;
+static bool edit_channel_b;
 static bool main_visible;
 static bool dragging;
 static int drag_offset;
 static uint32_t edit_value;
 static unsigned int edit_digits;
 static PwmSettings drawn_settings;
+static bool dual_pwm_visible;
+static DualPwmSettings drawn_dual_pwm;
 static bool stopwatch_visible;
 static bool drawn_stopwatch_running;
 static uint32_t drawn_stopwatch_ms;
@@ -70,11 +85,12 @@ typedef enum
 {
     HEADER_PWM,
     HEADER_STOPWATCH,
-    HEADER_CAPTURE
+    HEADER_CAPTURE,
+    HEADER_DUAL_PWM
 } PageHeader;
 
-/* “功、能、一、二、三”的固定字模，由现有 LCD 绘图接口显示。 */
-static const uint32_t title_bits[5][24] =
+/* “功、能、一、二、三、四”的固定字模，由现有 LCD 绘图接口显示。 */
+static const uint32_t title_bits[6][24] =
 {
     {
         0x000100U, 0x000300U, 0x000300U, 0x7FC300U, 0x7FC300U, 0x061FFCU,
@@ -106,6 +122,12 @@ static const uint32_t title_bits[5][24] =
         0x000000U, 0x000000U, 0x000000U, 0x000000U, 0x000000U, 0x7FFFFEU,
         0x7FFFFEU, 0x000000U, 0x000000U, 0x000000U, 0x000000U, 0x000000U,
     },
+    {
+        0x000000U, 0x000000U, 0x000000U, 0x3FFFFCU, 0x3FFFFCU, 0x30C60CU,
+        0x30C60CU, 0x30C60CU, 0x30C60CU, 0x30C60CU, 0x31860CU, 0x31860CU,
+        0x3307ECU, 0x3307ECU, 0x30000CU, 0x30000CU, 0x30000CU, 0x30000CU,
+        0x30000CU, 0x3FFFFCU, 0x3FFFFCU, 0x000000U, 0x000000U, 0x000000U,
+    },
 };
 
 static void DrawText(uint16_t x, uint16_t y, uint16_t width, uint8_t size,
@@ -135,7 +157,7 @@ static void DrawHeader(PageHeader page)
             }
         }
     }
-    static const char *const labels[] = {"PWM", "STOPWATCH", "CAPTURE"};
+    static const char *const labels[] = {"PWM", "STOPWATCH", "CAPTURE", "DUAL PWM"};
     DrawText(153, 16, 72, 16, labels[page], WHITE, HEADER_BG);
 }
 
@@ -157,11 +179,14 @@ static void DrawSlider(uint8_t duty_percent)
 
 void Ui_ShowPwm(PwmSettings settings)
 {
+    dual_pwm_visible = false;
     capture_visible = false;
     stopwatch_visible = false;
     const bool full_redraw = !main_visible;
     if (full_redraw)
     {
+        edit_field = EDIT_NONE;
+        dragging = false;
         LCD_Clear(PAGE_BG);
         DrawHeader(HEADER_PWM);
         DrawText(14, 56, 210, 16, "Tap a value to edit", BLACK, PAGE_BG);
@@ -194,6 +219,14 @@ void Ui_ShowPwm(PwmSettings settings)
 
     drawn_settings = settings;
     main_visible = true;
+}
+
+void Ui_RefreshPwm(PwmSettings settings)
+{
+    if (main_visible)
+    {
+        Ui_ShowPwm(settings);
+    }
 }
 
 static void DrawButton(int x, int y, int width, int height,
@@ -229,18 +262,26 @@ static void DrawEntry(bool invalid)
     }
 }
 
-static void OpenKeyboard(EditField field, PwmSettings settings)
+static void OpenKeyboard(EditField field, PwmSettings settings, PageHeader page, bool channel_b)
 {
     edit_field = field;
+    edit_channel_b = channel_b;
     edit_value = 0;
     edit_digits = 0;
     main_visible = false;
+    dual_pwm_visible = false;
 
     LCD_Clear(PAGE_BG);
-    DrawHeader(HEADER_PWM);
-    DrawText(14, 55, 211, 16, field == EDIT_FREQUENCY ? "Edit frequency" : "Edit duty", BLACK, PAGE_BG);
-
+    DrawHeader(page);
+    const char *prompt = field == EDIT_FREQUENCY ? "Edit frequency" : "Edit duty";
     char text[28];
+    if (page == HEADER_DUAL_PWM)
+    {
+        (void)snprintf(text, sizeof text, "%c: %s", channel_b ? 'B' : 'A', prompt);
+        prompt = text;
+    }
+    DrawText(14, 55, 211, 16, prompt, BLACK, PAGE_BG);
+
     if (field == EDIT_FREQUENCY)
     {
         (void)snprintf(text, sizeof text, "Current  %lu Hz", (unsigned long)settings.frequency_hz);
@@ -263,13 +304,12 @@ static void OpenKeyboard(EditField field, PwmSettings settings)
     DrawButton(14, 291, 66, 26, "BACK", HEADER_BG, WHITE);
 }
 
-static UiAction HandleKeyboard(TouchPoint point, PwmSettings settings, uint32_t *value)
+static UiAction HandleKeyboard(TouchPoint point, uint32_t *value)
 {
     if (point.x >= 14U && point.x < 80U && point.y >= 291U && point.y < 317U)
     {
         edit_field = EDIT_NONE;
-        Ui_ShowPwm(settings);
-        return UI_NO_CHANGE;
+        return UI_CANCEL_EDIT;
     }
 
     const int dx = point.x - KEY_LEFT;
@@ -319,8 +359,17 @@ UiAction Ui_HandleTouch(TouchEvent event, PwmSettings settings, uint32_t *value)
 {
     if (edit_field != EDIT_NONE)
     {
-        return event.type == TOUCH_DOWN ? HandleKeyboard(event.point, settings, value)
-                                       : UI_NO_CHANGE;
+        if (event.type != TOUCH_DOWN)
+        {
+            return UI_NO_CHANGE;
+        }
+        const UiAction action = HandleKeyboard(event.point, value);
+        if (action == UI_CANCEL_EDIT)
+        {
+            Ui_ShowPwm(settings);
+            return UI_NO_CHANGE;
+        }
+        return action;
     }
 
     const TouchPoint point = event.point;
@@ -330,12 +379,12 @@ UiAction Ui_HandleTouch(TouchEvent event, PwmSettings settings, uint32_t *value)
         {
             if (point.y >= 83U && point.y <= 123U)
             {
-                OpenKeyboard(EDIT_FREQUENCY, settings);
+                OpenKeyboard(EDIT_FREQUENCY, settings, HEADER_PWM, false);
                 return UI_NO_CHANGE;
             }
             if (point.y >= 135U && point.y <= 175U)
             {
-                OpenKeyboard(EDIT_DUTY, settings);
+                OpenKeyboard(EDIT_DUTY, settings, HEADER_PWM, false);
                 return UI_NO_CHANGE;
             }
         }
@@ -432,6 +481,7 @@ static void DrawStopwatchLaps(const StopwatchLap laps[STOPWATCH_LAP_CAPACITY])
 void Ui_ShowStopwatch(uint32_t elapsed_ms, bool running,
                       const StopwatchLap laps[STOPWATCH_LAP_CAPACITY])
 {
+    dual_pwm_visible = false;
     capture_visible = false;
     const bool entering = !stopwatch_visible;
     if (entering)
@@ -518,6 +568,7 @@ static void DrawCaptureValue(uint16_t y, const char *text, char *previous, bool 
 
 void Ui_ShowCapture(const CaptureResult *result)
 {
+    dual_pwm_visible = false;
     const bool entering = !capture_visible;
     if (entering)
     {
@@ -573,4 +624,251 @@ void Ui_ShowCapture(const CaptureResult *result)
                  HEADER_BG, PAGE_BG);
         drawn_capture_valid = result->valid;
     }
+}
+
+static void DrawDualPwmChannel(int x, PwmSettings settings, PwmSettings previous, bool entering)
+{
+    char text[18];
+    if (entering || settings.frequency_hz != previous.frequency_hz)
+    {
+        (void)snprintf(text, sizeof text, "%lu Hz", (unsigned long)settings.frequency_hz);
+        DrawButton(x, DUAL_FREQUENCY_Y, DUAL_VALUE_WIDTH, DUAL_VALUE_HEIGHT, text, WHITE, ACCENT);
+    }
+    if (entering || settings.duty_percent != previous.duty_percent)
+    {
+        (void)snprintf(text, sizeof text, "Duty %u%%", (unsigned int)settings.duty_percent);
+        DrawButton(x, DUAL_DUTY_Y, DUAL_VALUE_WIDTH, DUAL_VALUE_HEIGHT, text, WHITE, ACCENT);
+    }
+}
+
+static void DrawPhaseButton(int x, char sign)
+{
+    char text[6];
+    (void)snprintf(text, sizeof text, "%c%u ", sign, (unsigned int)PWM_PHASE_STEP_DEG);
+    DrawButton(x, DUAL_CONTROL_Y, DUAL_CONTROL_WIDTH, DUAL_CONTROL_HEIGHT, text, HEADER_BG, WHITE);
+
+    /* 最后一个字符留空，用小圆代替字库里没有的度数符号。 */
+    const int label_width = (int)strlen(text) * 8;
+    const int degree_x = x + (DUAL_CONTROL_WIDTH + label_width) / 2 - 4;
+    LCD_Draw_Circle(degree_x, DUAL_CONTROL_Y + 13, 2);
+}
+
+void Ui_ShowDualPwm(const DualPwmSettings *settings)
+{
+    const bool entering = !dual_pwm_visible;
+    if (entering)
+    {
+        main_visible = false;
+        stopwatch_visible = false;
+        capture_visible = false;
+        edit_field = EDIT_NONE;
+        dragging = false;
+        dual_pwm_visible = true;
+
+        LCD_Clear(PAGE_BG);
+        DrawHeader(HEADER_DUAL_PWM);
+        DrawText(14, 56, 100, 16, "A  PA11", HEADER_BG, PAGE_BG);
+        DrawText(126, 56, 100, 16, "B  PC7", HEADER_BG, PAGE_BG);
+        DrawText(14, 306, 210, 12, "Tap values to edit", HEADER_BG, PAGE_BG);
+
+        DrawPhaseButton(DUAL_PHASE_DOWN_X, '-');
+        DrawPhaseButton(DUAL_PHASE_UP_X, '+');
+    }
+
+    DrawDualPwmChannel(DUAL_A_X, settings->a, drawn_dual_pwm.a, entering);
+    DrawDualPwmChannel(DUAL_B_X, settings->b, drawn_dual_pwm.b, entering);
+
+    if (entering || settings->phase_deg != drawn_dual_pwm.phase_deg)
+    {
+        char text[24];
+        (void)snprintf(text, sizeof text, "B phase set: %u deg", (unsigned int)settings->phase_deg);
+        LCD_Fill(14, 188, 225, 215, PAGE_BG);
+        DrawText(14, 193, 210, 16, text, HEADER_BG, PAGE_BG);
+    }
+
+    if (entering || settings->sync != drawn_dual_pwm.sync)
+    {
+        const bool synced = settings->sync == DUAL_PWM_SYNC_ON;
+        DrawButton(DUAL_SYNC_X, DUAL_CONTROL_Y, DUAL_CONTROL_WIDTH, DUAL_CONTROL_HEIGHT,
+                   "SYNC", synced ? ACCENT : HEADER_BG, WHITE);
+        LCD_Fill(14, 270, 225, 294, PAGE_BG);
+        static const char *const status[] = {
+            [DUAL_PWM_SYNC_OFF] = "SYNC OFF",
+            [DUAL_PWM_SYNC_ON] = "SYNC ON",
+            [DUAL_PWM_SYNC_STARTING] = "SYNCING",
+            [DUAL_PWM_SYNC_STOPPING] = "LEAVING SYNC",
+            [DUAL_PWM_SYNC_NEEDS_MATCH] = "SET SAME FREQ",
+        };
+        DrawText(14, 275, 210, 16, status[settings->sync], HEADER_BG, PAGE_BG);
+    }
+
+    drawn_dual_pwm = *settings;
+}
+
+void Ui_RefreshDualPwm(const DualPwmSettings *settings)
+{
+    /* 运行状态变化时刷新主页，用户正在输入的数字留在键盘上。 */
+    if (dual_pwm_visible)
+    {
+        Ui_ShowDualPwm(settings);
+    }
+}
+
+UiAction Ui_HandleDualPwmTouch(TouchEvent event, const DualPwmSettings *settings, uint32_t *value)
+{
+    if (event.type != TOUCH_DOWN)
+    {
+        return UI_NO_CHANGE;
+    }
+
+    const TouchPoint point = event.point;
+    if (edit_field != EDIT_NONE)
+    {
+        const UiAction action = HandleKeyboard(point, value);
+        if (edit_channel_b && action == UI_SET_FREQUENCY)
+        {
+            return UI_SET_B_FREQUENCY;
+        }
+        if (edit_channel_b && action == UI_SET_DUTY)
+        {
+            return UI_SET_B_DUTY;
+        }
+        return action;
+    }
+
+    if (point.y >= DUAL_CONTROL_Y && point.y < DUAL_CONTROL_Y + DUAL_CONTROL_HEIGHT)
+    {
+        if (point.x >= DUAL_PHASE_DOWN_X && point.x < DUAL_PHASE_DOWN_X + DUAL_CONTROL_WIDTH)
+        {
+            return UI_PHASE_DOWN;
+        }
+        if (point.x >= DUAL_SYNC_X && point.x < DUAL_SYNC_X + DUAL_CONTROL_WIDTH)
+        {
+            return UI_TOGGLE_SYNC;
+        }
+        if (point.x >= DUAL_PHASE_UP_X && point.x < DUAL_PHASE_UP_X + DUAL_CONTROL_WIDTH)
+        {
+            return UI_PHASE_UP;
+        }
+        return UI_NO_CHANGE;
+    }
+
+    const bool channel_a = point.x >= DUAL_A_X && point.x < DUAL_A_X + DUAL_VALUE_WIDTH;
+    const bool channel_b = point.x >= DUAL_B_X && point.x < DUAL_B_X + DUAL_VALUE_WIDTH;
+    if (channel_a || channel_b)
+    {
+        const PwmSettings channel = channel_b ? settings->b : settings->a;
+        if (point.y >= DUAL_FREQUENCY_Y && point.y < DUAL_FREQUENCY_Y + DUAL_VALUE_HEIGHT)
+        {
+            OpenKeyboard(EDIT_FREQUENCY, channel, HEADER_DUAL_PWM, channel_b);
+        }
+        else if (point.y >= DUAL_DUTY_Y && point.y < DUAL_DUTY_Y + DUAL_VALUE_HEIGHT)
+        {
+            OpenKeyboard(EDIT_DUTY, channel, HEADER_DUAL_PWM, channel_b);
+        }
+    }
+    return UI_NO_CHANGE;
+}
+
+enum
+{
+    SNAKE_BOARD_X = 40,
+    SNAKE_BOARD_Y = 54,
+    SNAKE_CELL_PIXELS = 16
+};
+
+typedef struct
+{
+    uint16_t x;
+    uint16_t y;
+    uint16_t width;
+    uint16_t height;
+    const char *label;
+    UiSnakeAction action;
+} SnakeButton;
+
+static const SnakeButton snake_buttons[] =
+{
+    { 88, 250, 64, 30, "UP", UI_SNAKE_UP },
+    { 14, 285, 64, 31, "LEFT", UI_SNAKE_LEFT },
+    { 88, 285, 64, 31, "DOWN", UI_SNAKE_DOWN },
+    { 162, 285, 64, 31, "RIGHT", UI_SNAKE_RIGHT },
+    { 106, 4, 64, 26, "AUTO", UI_SNAKE_TOGGLE_AUTO },
+    { 177, 4, 56, 26, "RESET", UI_SNAKE_RESET }
+};
+
+void Ui_ShowSnake(const SnakeState *game, bool entering)
+{
+    static SnakeState drawn_game;
+    static const uint16_t cell_colors[] = {0x2104U, 0x04A0U, 0x07E0U, 0xF986U};
+    static const char *const status_labels[] = {"Press a direction", "PLAYING", "GAME OVER", "WIN"};
+
+    if (entering)
+    {
+        main_visible = false;
+        dual_pwm_visible = false;
+        stopwatch_visible = false;
+        capture_visible = false;
+        edit_field = EDIT_NONE;
+        dragging = false;
+
+        LCD_Clear(PAGE_BG);
+        LCD_Fill(0, 0, tftlcd_data.width - 1, 34, HEADER_BG);
+        DrawText(12, 10, 80, 16, "SNAKE", WHITE, HEADER_BG);
+        LCD_Fill(SNAKE_BOARD_X - 1, SNAKE_BOARD_Y - 1,
+                 SNAKE_BOARD_X + SNAKE_COLUMNS * SNAKE_CELL_PIXELS - 1,
+                 SNAKE_BOARD_Y + SNAKE_ROWS * SNAKE_CELL_PIXELS - 1, 0x39E7U);
+    }
+
+    for (unsigned int i = 0; i < sizeof snake_buttons / sizeof snake_buttons[0]; ++i)
+    {
+        const SnakeButton *button = &snake_buttons[i];
+        if (entering || (button->action == UI_SNAKE_TOGGLE_AUTO && game->automatic != drawn_game.automatic))
+        {
+            const char *label = button->action == UI_SNAKE_TOGGLE_AUTO && game->automatic
+                ? "MANUAL" : button->label;
+            DrawButton(button->x, button->y, button->width, button->height, label, ACCENT, WHITE);
+        }
+    }
+
+    if (entering || game->score != drawn_game.score || game->status != drawn_game.status)
+    {
+        char score[16];
+        (void)snprintf(score, sizeof score, "Score %u", (unsigned int)game->score);
+        LCD_Fill(12, 38, 227, 50, PAGE_BG);
+        DrawText(12, 38, 78, 12, score, BLACK, PAGE_BG);
+        DrawText(124, 38, 104, 12, status_labels[game->status], HEADER_BG, PAGE_BG);
+    }
+
+    /* 走格时只重画内容变化的格子，保留网格线和其他控件。 */
+    for (unsigned int i = 0; i < SNAKE_CELL_COUNT; ++i)
+    {
+        if (entering || game->cells[i] != drawn_game.cells[i])
+        {
+            const uint16_t x = SNAKE_BOARD_X + (i % SNAKE_COLUMNS) * SNAKE_CELL_PIXELS;
+            const uint16_t y = SNAKE_BOARD_Y + (i / SNAKE_COLUMNS) * SNAKE_CELL_PIXELS;
+            LCD_Fill(x, y, x + SNAKE_CELL_PIXELS - 2, y + SNAKE_CELL_PIXELS - 2,
+                     cell_colors[game->cells[i]]);
+        }
+    }
+    drawn_game = *game;
+}
+
+UiSnakeAction Ui_HandleSnakeTouch(TouchEvent event)
+{
+    if (event.type != TOUCH_DOWN)
+    {
+        return UI_SNAKE_NONE;
+    }
+
+    for (unsigned int i = 0; i < sizeof snake_buttons / sizeof snake_buttons[0]; ++i)
+    {
+        const SnakeButton *button = &snake_buttons[i];
+        if (event.point.x >= button->x && event.point.x < button->x + button->width &&
+            event.point.y >= button->y && event.point.y < button->y + button->height)
+        {
+            return button->action;
+        }
+    }
+    return UI_SNAKE_NONE;
 }

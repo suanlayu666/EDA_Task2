@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/pwm.c
     App/stopwatch.c
     App/capture.c
+    App/snake.c
     App/app.c
     App/ui.c
     App/touch_input.c

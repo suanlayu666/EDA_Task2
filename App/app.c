@@ -4,6 +4,7 @@
 #include "capture.h"
 #include "main.h"
 #include "pwm.h"
+#include "snake.h"
 #include "stopwatch.h"
 #include "tftlcd.h"
 #include "touch.h"
@@ -16,7 +17,9 @@ typedef enum
 {
     PAGE_PWM,
     PAGE_STOPWATCH,
-    PAGE_CAPTURE
+    PAGE_CAPTURE,
+    PAGE_DUAL_PWM,
+    PAGE_SNAKE
 } AppPage;
 
 /* 开机占空比以 50% 为基准，按步进取整，再限制在上限内。 */
@@ -28,7 +31,17 @@ enum
         STARTUP_DUTY_ROUNDED <= PWM_DUTY_MAX_PERCENT ? STARTUP_DUTY_ROUNDED : PWM_DUTY_MAX_PERCENT
 };
 
-static PwmSettings settings = {2000U, STARTUP_DUTY_PERCENT};
+/* 功能一和功能四共用实际输出的 A 路设定。 */
+static DualPwmSettings dual_pwm = {
+    .a = {2000U, STARTUP_DUTY_PERCENT},
+    .b = {800U, STARTUP_DUTY_PERCENT},
+    .phase_deg = 0U,
+    .sync = DUAL_PWM_SYNC_OFF,
+};
+/* 退出同步期间保存用户刚输入的参数，频率为 0 表示没有待提交值。 */
+static PwmSettings pending_pwm_a;
+static PwmSettings pending_pwm_b;
+static bool sync_needs_match;
 static bool calibrated;
 static AppPage current_page = PAGE_PWM;
 static TouchPoint calibration_targets[4];
@@ -36,7 +49,11 @@ static uint16_t calibration_samples[4][2];
 static uint8_t calibration_index;
 static uint32_t last_stopwatch_refresh_ms;
 static uint32_t last_capture_refresh_ms;
+static uint32_t last_snake_step_ms;
 
+/*
+ * 读取 KEY0 并做 20 ms 消抖。确认一次新的按下时返回 true，用于切换功能页。
+ */
 static bool Key0_Pressed(void)
 {
     static bool last_raw_down;
@@ -60,24 +77,32 @@ static bool Key0_Pressed(void)
     return false;
 }
 
+/*
+ * 开机时调用一次。提交并启动 A、B 路 PWM，随后启动秒表、输入捕获和触摸屏。
+ */
 void App_Init(void)
 {
     /* 先提交符合上限的开机参数，再开启 PA11 输出。 */
-    Pwm_Request(settings.frequency_hz, settings.duty_percent);
+    Pwm_Request(dual_pwm.a.frequency_hz, dual_pwm.a.duty_percent);
     Pwm_Init();
+
+    /* TIM8 只需启动一次，之后硬件持续输出 B 路。 */
+    PwmB_Request(dual_pwm.b.frequency_hz, dual_pwm.b.duty_percent);
+    PwmB_Init();
 
     /* main.c 已初始化 TIM6，这里启动秒表的 1 ms 时间基准。 */
     Stopwatch_Init();
 
     /* TIM5 在后台持续测量 PA0，功能三读取最新结果。 */
     Capture_Init();
+    Snake_Reset(false, HAL_GetTick());
 
     TFTLCD_Init();
     calibrated = TouchInput_Init();
 
     if (calibrated)
     {
-        Ui_ShowPwm(settings);
+        Ui_ShowPwm(dual_pwm.a);
         return;
     }
 
@@ -90,6 +115,9 @@ void App_Init(void)
     Ui_ShowCalibration(calibration_targets, false);
 }
 
+/*
+ * 处理秒表页面的触摸操作，并按刷新间隔更新计时显示。
+ */
 static void StopwatchPage_Task(void)
 {
     TouchEvent event;
@@ -122,11 +150,211 @@ static void StopwatchPage_Task(void)
     }
 }
 
+/* 提交给正确的定时器，驱动接受后更新两页共用的设定。 */
+static void PwmApplySettings(bool channel_b, PwmSettings requested)
+{
+    if (channel_b)
+    {
+        if (PwmB_Request(requested.frequency_hz, requested.duty_percent))
+        {
+            dual_pwm.b = requested;
+        }
+    }
+    else if (Pwm_Request(requested.frequency_hz, requested.duty_percent))
+    {
+        dual_pwm.a = requested;
+    }
+}
+
+/* 修改频率时如果仍在同步，先退出，再交给主循环提交参数。 */
+static void PwmEditSettings(bool channel_b, bool edit_frequency, uint32_t value)
+{
+    const PwmSyncState sync = Pwm_GetSyncState();
+    const PwmSettings current = channel_b ? dual_pwm.b : dual_pwm.a;
+    PwmSettings *pending = channel_b ? &pending_pwm_b : &pending_pwm_a;
+    PwmSettings requested = pending->frequency_hz != 0U ? *pending : current;
+    if (edit_frequency)
+    {
+        requested.frequency_hz = value;
+    }
+    else
+    {
+        requested.duty_percent = (uint8_t)value;
+    }
+
+    if (sync != PWM_SYNC_OFF && requested.frequency_hz != current.frequency_hz)
+    {
+        Pwm_SetSync(false);
+        sync_needs_match = true;
+        *pending = requested;
+    }
+    else if (sync == PWM_SYNC_STOPPING)
+    {
+        *pending = requested;
+    }
+    else
+    {
+        PwmApplySettings(channel_b, requested);
+    }
+}
+
+/* 把驱动的同步状态换成页面提示。两路同频后清除频率提示。 */
+static void DualPwm_UpdateSync(PwmSyncState sync)
+{
+    if (dual_pwm.a.frequency_hz == dual_pwm.b.frequency_hz &&
+        pending_pwm_a.frequency_hz == 0U && pending_pwm_b.frequency_hz == 0U)
+    {
+        sync_needs_match = false;
+    }
+
+    switch (sync)
+    {
+        case PWM_SYNC_STARTING: dual_pwm.sync = DUAL_PWM_SYNC_STARTING; break;
+        case PWM_SYNC_ON:       dual_pwm.sync = DUAL_PWM_SYNC_ON; break;
+        case PWM_SYNC_STOPPING: dual_pwm.sync = DUAL_PWM_SYNC_STOPPING; break;
+        case PWM_SYNC_OFF:
+            dual_pwm.sync = sync_needs_match ? DUAL_PWM_SYNC_NEEDS_MATCH : DUAL_PWM_SYNC_OFF;
+            break;
+    }
+}
+
+/* 同步切换和待提交参数独立于触摸运行。只刷新正在显示的页面。 */
+static void PwmControls_Task(void)
+{
+    Pwm_Task();
+    const PwmSyncState sync = Pwm_GetSyncState();
+    const bool apply_a = sync == PWM_SYNC_OFF && pending_pwm_a.frequency_hz != 0U;
+    const bool apply_b = sync == PWM_SYNC_OFF && pending_pwm_b.frequency_hz != 0U;
+    if (apply_a)
+    {
+        PwmApplySettings(false, pending_pwm_a);
+        pending_pwm_a.frequency_hz = 0U;
+    }
+    if (apply_b)
+    {
+        PwmApplySettings(true, pending_pwm_b);
+        pending_pwm_b.frequency_hz = 0U;
+    }
+
+    const DualPwmSync previous = dual_pwm.sync;
+    DualPwm_UpdateSync(sync);
+    if (current_page == PAGE_DUAL_PWM && (apply_a || apply_b || dual_pwm.sync != previous))
+    {
+        Ui_RefreshDualPwm(&dual_pwm);
+    }
+    if (current_page == PAGE_PWM && apply_a)
+    {
+        Ui_RefreshPwm(dual_pwm.a);
+    }
+}
+
+/* 功能四的触摸事件提交给驱动，显示驱动接受的设定值。 */
+static void DualPwm_HandleTouch(TouchEvent event)
+{
+    uint32_t value;
+    switch (Ui_HandleDualPwmTouch(event, &dual_pwm, &value))
+    {
+        case UI_NO_CHANGE:
+            return;
+        case UI_CANCEL_EDIT:
+            break;
+        case UI_SET_FREQUENCY:
+            PwmEditSettings(false, true, value);
+            break;
+        case UI_SET_DUTY:
+            PwmEditSettings(false, false, value);
+            break;
+        case UI_SET_B_FREQUENCY:
+            PwmEditSettings(true, true, value);
+            break;
+        case UI_SET_B_DUTY:
+            PwmEditSettings(true, false, value);
+            break;
+        case UI_TOGGLE_SYNC:
+        {
+            const PwmSyncState sync = Pwm_GetSyncState();
+            if (sync == PWM_SYNC_OFF)
+            {
+                sync_needs_match = !Pwm_SetSync(true);
+            }
+            else if (sync != PWM_SYNC_STOPPING)
+            {
+                Pwm_SetSync(false);
+            }
+            break;
+        }
+        case UI_PHASE_DOWN:
+            if (dual_pwm.phase_deg > 0U)
+            {
+                /* 360° 若不在步进的整数档，减一次仍返回上一档。 */
+                const uint16_t angle = ((dual_pwm.phase_deg - 1U) / PWM_PHASE_STEP_DEG) * PWM_PHASE_STEP_DEG;
+                if (Pwm_SetPhase(angle))
+                {
+                    dual_pwm.phase_deg = angle;
+                }
+            }
+            break;
+        case UI_PHASE_UP:
+        {
+            const uint16_t next = dual_pwm.phase_deg + PWM_PHASE_STEP_DEG;
+            const uint16_t angle = next <= 360U ? next : 360U;
+            if (Pwm_SetPhase(angle))
+            {
+                dual_pwm.phase_deg = angle;
+            }
+            break;
+        }
+    }
+
+    DualPwm_UpdateSync(Pwm_GetSyncState());
+    Ui_ShowDualPwm(&dual_pwm);
+}
+
+static void SnakePage_Task(void)
+{
+    const uint32_t now = HAL_GetTick();
+    const SnakeState *game = Snake_GetState();
+    TouchEvent event;
+    if (TouchInput_Poll(false, &event))
+    {
+        const UiSnakeAction action = Ui_HandleSnakeTouch(event);
+        if (action == UI_SNAKE_TOGGLE_AUTO || action == UI_SNAKE_RESET)
+        {
+            Snake_Reset(action == UI_SNAKE_TOGGLE_AUTO ? !game->automatic : game->automatic, now);
+            last_snake_step_ms = now;
+            Ui_ShowSnake(game, false);
+        }
+        else if (action >= UI_SNAKE_UP && action <= UI_SNAKE_LEFT)
+        {
+            const bool ready = game->status == SNAKE_READY;
+            Snake_SetDirection((SnakeDirection)action);
+            if (ready && game->status == SNAKE_RUNNING)
+            {
+                last_snake_step_ms = now;
+                Ui_ShowSnake(game, false);
+            }
+        }
+    }
+
+    /* 到时间只走一步，主循环继续处理实体键、PWM 和输入捕获。 */
+    const uint32_t interval_ms = game->automatic ? 15U : 200U;
+    if (game->status == SNAKE_RUNNING && now - last_snake_step_ms >= interval_ms)
+    {
+        last_snake_step_ms = now;
+        Snake_Step();
+        Ui_ShowSnake(game, false);
+    }
+}
+
+/*
+ * 主循环入口。推进 PWM 同步和输入捕获，检测 KEY0 切页，再处理当前页面的触摸。
+ */
 void App_Task(void)
 {
+    PwmControls_Task();
     Capture_Task();
 
-    /* KEY0 依次切到秒表、测量和 PWM。 */
+    /* KEY0 依次切换四个功能页和贪吃蛇。 */
     if (calibrated && Key0_Pressed())
     {
         switch (current_page)
@@ -142,10 +370,25 @@ void App_Task(void)
                 last_capture_refresh_ms = HAL_GetTick();
                 break;
             case PAGE_CAPTURE:
+                current_page = PAGE_DUAL_PWM;
+                Ui_ShowDualPwm(&dual_pwm);
+                break;
+            case PAGE_DUAL_PWM:
+                current_page = PAGE_SNAKE;
+                last_snake_step_ms = HAL_GetTick();
+                Ui_ShowSnake(Snake_GetState(), true);
+                break;
+            case PAGE_SNAKE:
                 current_page = PAGE_PWM;
-                Ui_ShowPwm(settings);
+                Ui_ShowPwm(dual_pwm.a);
                 break;
         }
+        return;
+    }
+
+    if (current_page == PAGE_SNAKE)
+    {
+        SnakePage_Task();
         return;
     }
 
@@ -191,7 +434,7 @@ void App_Task(void)
 
                 if (calibrated)
                 {
-                    Ui_ShowPwm(settings);
+                    Ui_ShowPwm(dual_pwm.a);
                 }
                 else
                 {
@@ -203,25 +446,20 @@ void App_Task(void)
         return;
     }
 
+    if (current_page == PAGE_DUAL_PWM)
+    {
+        DualPwm_HandleTouch(event);
+        return;
+    }
+
     /* 键盘确认或滑块跨档时，界面通过 &value 写入新值。 */
     uint32_t value;
-    const UiAction action = Ui_HandleTouch(event, settings, &value);
+    const UiAction action = Ui_HandleTouch(event, dual_pwm.a, &value);
     if (action == UI_NO_CHANGE)
     {
         return;
     }
 
-    /* 只替换本次操作修改的那一项，另一项沿用当前值。 */
-    if (action == UI_SET_FREQUENCY)
-    {
-        settings.frequency_hz = value;
-    }
-    else
-    {
-        settings.duty_percent = (uint8_t)value;
-    }
-
-    /* 第一个参数是频率（Hz），第二个是占空比（30 表示 30%）。 */
-    Pwm_Request(settings.frequency_hz, settings.duty_percent);
-    Ui_ShowPwm(settings);
+    PwmEditSettings(false, action == UI_SET_FREQUENCY, value);
+    Ui_ShowPwm(dual_pwm.a);
 }
