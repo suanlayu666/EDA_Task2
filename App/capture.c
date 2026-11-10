@@ -9,7 +9,6 @@
 static bool capture_started;
 static bool seen_rising;
 static uint32_t last_poll_ms;
-static uint32_t last_sample_ms;
 static CaptureResult capture_result;
 
 void Capture_Init(void)
@@ -49,7 +48,7 @@ void Capture_Task(void)
     }
     last_poll_ms = now;
 
-    if (now - last_sample_ms >= CAPTURE_TIMEOUT_MS)
+    if (now - capture_result.sample_ms >= CAPTURE_TIMEOUT_MS)
     {
         capture_result.valid = false;
     }
@@ -89,7 +88,7 @@ void Capture_Task(void)
     capture_result.frequency_hz = (float)TIM5_CLOCK_HZ / (float)period;
     capture_result.duty_percent = 100.0f * (float)high / (float)period;
     capture_result.valid = true;
-    last_sample_ms = now;
+    capture_result.sample_ms = now;
 }
 
 const CaptureResult *Capture_GetResult(void)

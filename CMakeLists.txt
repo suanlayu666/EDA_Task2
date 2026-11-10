@@ -48,7 +48,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     App/pwm.c
     App/stopwatch.c
+    App/spwm.c
     App/capture.c
+    App/sweep.c
     App/snake.c
     App/app.c
     App/ui.c

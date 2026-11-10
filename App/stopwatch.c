@@ -20,13 +20,10 @@ void Stopwatch_Init(void)
     HAL_TIM_Base_Start_IT(&htim6);
 }
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+/* TIM6 每 1 ms 由应用层的定时器回调调用一次。 */
+void Stopwatch_OnPeriodElapsed(void)
 {
-    /* HAL 共用这个回调，只累加来自 TIM6 的更新事件。 */
-    if (htim->Instance == TIM6)
-    {
-        ++tick_ms;
-    }
+    ++tick_ms;
 }
 
 uint32_t Stopwatch_GetTickMs(void)

@@ -14,6 +14,7 @@ typedef struct
 } StopwatchLap;
 
 void Stopwatch_Init(void);
+void Stopwatch_OnPeriodElapsed(void);
 uint32_t Stopwatch_GetTickMs(void);
 void Stopwatch_ToggleRunning(void);
 void Stopwatch_Reset(void);

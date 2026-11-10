@@ -2,6 +2,7 @@
 #include "ui.h"
 
 #include "app_config.h"
+#include "spwm.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -86,11 +87,12 @@ typedef enum
     HEADER_PWM,
     HEADER_STOPWATCH,
     HEADER_CAPTURE,
-    HEADER_DUAL_PWM
+    HEADER_DUAL_PWM,
+    HEADER_SWEEP
 } PageHeader;
 
-/* “功、能、一、二、三、四”的固定字模，由现有 LCD 绘图接口显示。 */
-static const uint32_t title_bits[6][24] =
+/* “功、能、一、二、三、四、五”的固定字模，由现有 LCD 绘图接口显示。 */
+static const uint32_t title_bits[7][24] =
 {
     {
         0x000100U, 0x000300U, 0x000300U, 0x7FC300U, 0x7FC300U, 0x061FFCU,
@@ -128,6 +130,12 @@ static const uint32_t title_bits[6][24] =
         0x3307ECU, 0x3307ECU, 0x30000CU, 0x30000CU, 0x30000CU, 0x30000CU,
         0x30000CU, 0x3FFFFCU, 0x3FFFFCU, 0x000000U, 0x000000U, 0x000000U,
     },
+    {
+        0x000000U, 0x000000U, 0x000000U, 0x3FFFFCU, 0x3FFFFCU, 0x030000U,
+        0x030000U, 0x060000U, 0x060000U, 0x3FFFF0U, 0x3FFFF0U, 0x0C0030U,
+        0x0C0030U, 0x180030U, 0x180060U, 0x180060U, 0x300060U, 0x3000C0U,
+        0x3000C0U, 0x7FFFFEU, 0x7FFFFEU, 0x000000U, 0x000000U, 0x000000U,
+    },
 };
 
 static void DrawText(uint16_t x, uint16_t y, uint16_t width, uint8_t size,
@@ -157,7 +165,7 @@ static void DrawHeader(PageHeader page)
             }
         }
     }
-    static const char *const labels[] = {"PWM", "STOPWATCH", "CAPTURE", "DUAL PWM"};
+    static const char *const labels[] = {"PWM", "STOPWATCH", "CAPTURE", "DUAL PWM", "SWEEP"};
     DrawText(153, 16, 72, 16, labels[page], WHITE, HEADER_BG);
 }
 
@@ -871,4 +879,166 @@ UiSnakeAction Ui_HandleSnakeTouch(TouchEvent event)
         }
     }
     return UI_SNAKE_NONE;
+}
+
+enum
+{
+    SWEEP_START_X = 14,
+    SWEEP_START_Y = 260,
+    SWEEP_START_WIDTH = 72,
+    SWEEP_START_HEIGHT = 36,
+    SWEEP_ROW_Y = 77,
+    SWEEP_ROW_HEIGHT = 17,
+};
+
+static void DrawSweepRow(const SweepPoint *point, unsigned int row)
+{
+    const uint16_t y = SWEEP_ROW_Y + row * SWEEP_ROW_HEIGHT;
+    const uint16_t background = row % 2U == 0U ? WHITE : PAGE_BG;
+    const bool measured = point->status == SWEEP_POINT_PASS || point->status == SWEEP_POINT_OUT_OF_TOLERANCE;
+    const uint16_t color = point->status == SWEEP_POINT_PENDING || point->status == SWEEP_POINT_PASS ? BLACK : RED;
+    char text[16];
+
+    LCD_Fill(10, y, 229, y + SWEEP_ROW_HEIGHT - 1U, background);
+    (void)snprintf(text, sizeof text, "%lu", (unsigned long)point->set_frequency_hz);
+    DrawText(14, y + 2, 70, 12, text, BLACK, background);
+
+    const char *reading = "--";
+    if (measured)
+    {
+        if (point->measured_frequency_hz < 1000.0f)
+        {
+            const uint32_t scaled = (uint32_t)(point->measured_frequency_hz * 100.0f + 0.5f);
+            (void)snprintf(text, sizeof text, "%lu.%02lu", (unsigned long)(scaled / 100U),
+                           (unsigned long)(scaled % 100U));
+        }
+        else
+        {
+            (void)snprintf(text, sizeof text, "%lu", (unsigned long)(point->measured_frequency_hz + 0.5f));
+        }
+        reading = text;
+    }
+    else if (point->status == SWEEP_POINT_NO_SIGNAL)
+    {
+        reading = "NO SIG";
+    }
+    else if (point->status == SWEEP_POINT_PWM_REJECTED)
+    {
+        reading = "REJECT";
+    }
+    DrawText(89, y + 2, 78, 12, reading, color, background);
+
+    const char *error = "--";
+    if (measured && point->error_percent < 999.995f)
+    {
+        const uint32_t scaled = (uint32_t)(point->error_percent * 100.0f + 0.5f);
+        (void)snprintf(text, sizeof text, "%lu.%02lu", (unsigned long)(scaled / 100U),
+                       (unsigned long)(scaled % 100U));
+        error = text;
+    }
+    else if (measured)
+    {
+        error = ">999";
+    }
+    DrawText(173, y + 2, 54, 12, error, color, background);
+}
+
+void Ui_ShowSweep(const SweepResult *result, bool entering, bool start_blocked)
+{
+    static uint8_t drawn_completed;
+    static SweepStatus drawn_status;
+    static bool drawn_blocked;
+    if (entering)
+    {
+        main_visible = false;
+        dual_pwm_visible = false;
+        stopwatch_visible = false;
+        capture_visible = false;
+        edit_field = EDIT_NONE;
+        dragging = false;
+
+        LCD_Clear(PAGE_BG);
+        DrawHeader(HEADER_SWEEP);
+        DrawText(14, 55, 70, 16, "SET Hz", HEADER_BG, PAGE_BG);
+        DrawText(89, 55, 78, 16, "MEAS Hz", HEADER_BG, PAGE_BG);
+        DrawText(173, 55, 54, 16, "ERR %", HEADER_BG, PAGE_BG);
+        DrawText(14, 304, 210, 12, "PA11 -> PA0", HEADER_BG, PAGE_BG);
+    }
+
+    /* 进入时画整表，运行中只补画刚测完的行。 */
+    const unsigned int end = entering ? SWEEP_POINT_COUNT : result->completed;
+    for (unsigned int i = entering ? 0U : drawn_completed; i < end; ++i)
+    {
+        DrawSweepRow(&result->points[i], i);
+    }
+    if (entering || drawn_status != result->status || drawn_blocked != start_blocked)
+    {
+        static const char *const statuses[] = {"READY", "RUNNING", "PASS", "FAIL"};
+        const bool running = result->status == SWEEP_RUNNING;
+        DrawButton(SWEEP_START_X, SWEEP_START_Y, SWEEP_START_WIDTH, SWEEP_START_HEIGHT,
+                   running ? "RUN" : "START", running ? TRACK_BG : HEADER_BG, running ? BLACK : WHITE);
+        LCD_Fill(95, 260, 229, 295, PAGE_BG);
+        DrawText(100, 270, 126, 16, start_blocked ? "TURN SYNC OFF" : statuses[result->status],
+                 start_blocked || result->status == SWEEP_FAIL ? RED : HEADER_BG, PAGE_BG);
+    }
+    drawn_completed = result->completed;
+    drawn_status = result->status;
+    drawn_blocked = start_blocked;
+}
+
+bool Ui_SweepStartPressed(TouchEvent event)
+{
+    return event.type == TOUCH_DOWN &&
+           event.point.x >= SWEEP_START_X && event.point.x < SWEEP_START_X + SWEEP_START_WIDTH &&
+           event.point.y >= SWEEP_START_Y && event.point.y < SWEEP_START_Y + SWEEP_START_HEIGHT;
+}
+
+enum
+{
+    SPWM_BUTTON_X = 38,
+    SPWM_BUTTON_Y = 174,
+    SPWM_BUTTON_WIDTH = 164,
+    SPWM_BUTTON_HEIGHT = 42
+};
+
+/* 切入 SPWM 页时画整页，按下按钮后只重绘按钮和输出状态。 */
+void Ui_ShowSpwm(bool running, bool entering)
+{
+    if (entering)
+    {
+        main_visible = false;
+        dual_pwm_visible = false;
+        stopwatch_visible = false;
+        capture_visible = false;
+        edit_field = EDIT_NONE;
+        dragging = false;
+
+        LCD_Clear(PAGE_BG);
+        LCD_Fill(0, 0, tftlcd_data.width - 1, 45, HEADER_BG);
+        DrawText(14, 11, 210, 24, "SPWM", WHITE, HEADER_BG);
+        DrawText(14, 57, 210, 16, "TIM2 CH4  /  PA3", HEADER_BG, PAGE_BG);
+
+        char label[24];
+        (void)snprintf(label, sizeof label, "Sine       %u Hz", SPWM_SINE_HZ);
+        LCD_Fill(14, 83, 225, 114, WHITE);
+        DrawText(24, 91, 194, 16, label, BLACK, WHITE);
+        (void)snprintf(label, sizeof label, "Carrier    %u kHz", SPWM_CARRIER_HZ / 1000U);
+        LCD_Fill(14, 123, 225, 154, WHITE);
+        DrawText(24, 131, 194, 16, label, BLACK, WHITE);
+        DrawText(14, 282, 210, 16, "PA3 -> RC FILTER", HEADER_BG, PAGE_BG);
+    }
+
+    DrawButton(SPWM_BUTTON_X, SPWM_BUTTON_Y, SPWM_BUTTON_WIDTH, SPWM_BUTTON_HEIGHT,
+               running ? "STOP" : "START", running ? ACCENT : HEADER_BG, WHITE);
+    LCD_Fill(14, 230, 225, 258, PAGE_BG);
+    DrawText(24, 236, 194, 16, running ? "OUTPUT ON" : "OUTPUT OFF", HEADER_BG, PAGE_BG);
+}
+
+/* 只识别按钮范围内的按下事件，长按或拖动时不重复切换。 */
+bool Ui_SpwmTogglePressed(TouchEvent event)
+{
+    const TouchPoint point = event.point;
+    return event.type == TOUCH_DOWN &&
+           point.x >= SPWM_BUTTON_X && point.x < SPWM_BUTTON_X + SPWM_BUTTON_WIDTH &&
+           point.y >= SPWM_BUTTON_Y && point.y < SPWM_BUTTON_Y + SPWM_BUTTON_HEIGHT;
 }

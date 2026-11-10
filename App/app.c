@@ -5,8 +5,11 @@
 #include "main.h"
 #include "pwm.h"
 #include "snake.h"
+#include "spwm.h"
 #include "stopwatch.h"
+#include "sweep.h"
 #include "tftlcd.h"
+#include "tim.h"
 #include "touch.h"
 #include "touch_input.h"
 #include "ui.h"
@@ -19,7 +22,9 @@ typedef enum
     PAGE_STOPWATCH,
     PAGE_CAPTURE,
     PAGE_DUAL_PWM,
-    PAGE_SNAKE
+    PAGE_SWEEP,
+    PAGE_SNAKE,
+    PAGE_SPWM
 } AppPage;
 
 /* 开机占空比以 50% 为基准，按步进取整，再限制在上限内。 */
@@ -50,6 +55,7 @@ static uint8_t calibration_index;
 static uint32_t last_stopwatch_refresh_ms;
 static uint32_t last_capture_refresh_ms;
 static uint32_t last_snake_step_ms;
+static bool sweep_start_blocked;
 
 /*
  * 读取 KEY0 并做 20 ms 消抖。确认一次新的按下时返回 true，用于切换功能页。
@@ -92,6 +98,9 @@ void App_Init(void)
 
     /* main.c 已初始化 TIM6，这里启动秒表的 1 ms 时间基准。 */
     Stopwatch_Init();
+
+    /* TIM2 已由 main.c 初始化。生成正弦表，等触摸屏点 START 再调制。 */
+    Spwm_Init();
 
     /* TIM5 在后台持续测量 PA0，功能三读取最新结果。 */
     Capture_Init();
@@ -346,15 +355,62 @@ static void SnakePage_Task(void)
     }
 }
 
+static void SweepPage_Task(void)
+{
+    TouchEvent event;
+    if (TouchInput_Poll(false, &event) && Ui_SweepStartPressed(event) && !Sweep_IsRunning())
+    {
+        const bool started = Sweep_Start(dual_pwm.a.frequency_hz, dual_pwm.a.duty_percent);
+        sweep_start_blocked = !started;
+        Ui_ShowSweep(Sweep_GetResult(), started, sweep_start_blocked);
+        return;
+    }
+    Ui_ShowSweep(Sweep_GetResult(), false, sweep_start_blocked);
+}
+
+/* HAL 的共用回调按定时器分发，秒表与 SPWM 各自处理自己的周期。 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM6)
+    {
+        Stopwatch_OnPeriodElapsed();
+    }
+    else if (htim->Instance == TIM2)
+    {
+        Spwm_OnPeriodElapsed();
+    }
+}
+
+/* SPWM 页面只在按下 START 或 STOP 时提交操作并刷新状态。 */
+static void SpwmPage_Task(void)
+{
+    TouchEvent event;
+    if (!TouchInput_Poll(false, &event) || !Ui_SpwmTogglePressed(event))
+    {
+        return;
+    }
+
+    if (Spwm_IsRunning())
+    {
+        Spwm_Stop();
+    }
+    else
+    {
+        Spwm_Start();
+    }
+    Ui_ShowSpwm(Spwm_IsRunning(), false);
+}
+
 /*
- * 主循环入口。推进 PWM 同步和输入捕获，检测 KEY0 切页，再处理当前页面的触摸。
+ * 主循环入口。推进 PWM 同步、输入捕获和扫频，再处理切页和触摸。
  */
 void App_Task(void)
 {
     PwmControls_Task();
     Capture_Task();
+    Sweep_Task(HAL_GetTick());
 
-    /* KEY0 依次切换四个功能页和贪吃蛇。 */
+    /* KEY0 在各功能页之间循环，SPWM 页放在贪吃蛇后面。 */
     if (calibrated && Key0_Pressed())
     {
         switch (current_page)
@@ -374,11 +430,21 @@ void App_Task(void)
                 Ui_ShowDualPwm(&dual_pwm);
                 break;
             case PAGE_DUAL_PWM:
+                current_page = PAGE_SWEEP;
+                sweep_start_blocked = false;
+                Ui_ShowSweep(Sweep_GetResult(), true, false);
+                break;
+            case PAGE_SWEEP:
                 current_page = PAGE_SNAKE;
                 last_snake_step_ms = HAL_GetTick();
                 Ui_ShowSnake(Snake_GetState(), true);
                 break;
             case PAGE_SNAKE:
+                current_page = PAGE_SPWM;
+                /* 进入页面时显示实际开关状态。 */
+                Ui_ShowSpwm(Spwm_IsRunning(), true);
+                break;
+            case PAGE_SPWM:
                 current_page = PAGE_PWM;
                 Ui_ShowPwm(dual_pwm.a);
                 break;
@@ -386,9 +452,21 @@ void App_Task(void)
         return;
     }
 
+    if (current_page == PAGE_SWEEP)
+    {
+        SweepPage_Task();
+        return;
+    }
+
     if (current_page == PAGE_SNAKE)
     {
         SnakePage_Task();
+        return;
+    }
+
+    if (current_page == PAGE_SPWM)
+    {
+        SpwmPage_Task();
         return;
     }
 
@@ -443,6 +521,12 @@ void App_Task(void)
                 }
             }
         }
+        return;
+    }
+
+    /* 扫频临时控制 A 路，结束前让 PWM 页面保持原有设定。 */
+    if (Sweep_IsRunning())
+    {
         return;
     }
 

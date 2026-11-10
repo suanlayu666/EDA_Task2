@@ -4,6 +4,7 @@
 #include "capture.h"
 #include "snake.h"
 #include "stopwatch.h"
+#include "sweep.h"
 #include "touch_input.h"
 
 typedef struct
@@ -61,6 +62,10 @@ typedef enum
     UI_SNAKE_NONE
 } UiSnakeAction;
 
+void Ui_ShowSpwm(bool running, bool entering);
+bool Ui_SpwmTogglePressed(TouchEvent event);
+void Ui_ShowSweep(const SweepResult *result, bool entering, bool start_blocked);
+bool Ui_SweepStartPressed(TouchEvent event);
 void Ui_ShowSnake(const SnakeState *game, bool entering);
 UiSnakeAction Ui_HandleSnakeTouch(TouchEvent event);
 void Ui_ShowPwm(PwmSettings settings);

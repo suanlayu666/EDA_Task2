@@ -11,6 +11,7 @@ typedef struct
     uint32_t high_ticks;
     float frequency_hz;
     float duty_percent;
+    uint32_t sample_ms;  /* 发布本次读数时的毫秒刻度。 */
 } CaptureResult;
 
 void Capture_Init(void);
