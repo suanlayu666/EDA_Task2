@@ -13,10 +13,11 @@ typedef enum
     MENU_DUAL_PWM,
     MENU_SWEEP,
     MENU_SPWM,
-    MENU_SNAKE
+    MENU_SNAKE,
+    MENU_TILT_MAZE
 } MenuItem;
 
-/* 绘制七项功能及返回菜单的操作提示。 */
+/* 绘制八项功能及返回菜单的操作提示。 */
 void Menu_Show(void);
 
 /* 返回本次按下选中的功能。点空白或滑动时返回 MENU_NONE。 */

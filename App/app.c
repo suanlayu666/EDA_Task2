@@ -10,6 +10,7 @@
 #include "stopwatch.h"
 #include "sweep.h"
 #include "tftlcd.h"
+#include "tilt_maze.h"
 #include "tim.h"
 #include "touch.h"
 #include "touch_input.h"
@@ -26,7 +27,8 @@ typedef enum
     PAGE_DUAL_PWM,
     PAGE_SWEEP,
     PAGE_SPWM,
-    PAGE_SNAKE
+    PAGE_SNAKE,
+    PAGE_TILT_MAZE
 } AppPage;
 
 /* 开机占空比以 50% 为基准，按步进取整，再限制在上限内。 */
@@ -129,6 +131,10 @@ static void App_OpenMenuItem(MenuItem item)
             current_page = PAGE_SNAKE;
             last_snake_step_ms = HAL_GetTick();
             Ui_ShowSnake(Snake_GetState(), true);
+            break;
+        case MENU_TILT_MAZE:
+            current_page = PAGE_TILT_MAZE;
+            TiltMaze_Open();
             break;
         case MENU_NONE:
             break;
@@ -513,6 +519,12 @@ void App_Task(void)
     if (current_page == PAGE_SNAKE)
     {
         SnakePage_Task();
+        return;
+    }
+
+    if (current_page == PAGE_TILT_MAZE)
+    {
+        TiltMaze_Task();
         return;
     }
 

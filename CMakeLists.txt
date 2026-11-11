@@ -52,6 +52,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/capture.c
     App/sweep.c
     App/snake.c
+    App/tilt_maze.c
+    App/mpu6050.c
     App/app.c
     App/menu.c
     App/ui.c

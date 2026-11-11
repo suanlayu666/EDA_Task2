@@ -7,8 +7,8 @@ enum
     MENU_LEFT = 14,
     MENU_RIGHT = 225,
     MENU_TOP = 51,
-    MENU_ROW_HEIGHT = 30,
-    MENU_ROW_SPACING = 35
+    MENU_ROW_HEIGHT = 26,
+    MENU_ROW_SPACING = 31
 };
 
 #define MENU_BACKGROUND 0xEF7DU
@@ -28,6 +28,7 @@ static const struct
     {MENU_SWEEP, "Auto Sweep"},
     {MENU_SPWM, "SPWM Output"},
     {MENU_SNAKE, "Snake"},
+    {MENU_TILT_MAZE, "Tilt Maze"},
 };
 
 /* 使用板载 LCD 字库在指定区域绘制一行菜单文字。 */
@@ -39,7 +40,7 @@ static void DrawMenuText(uint16_t x, uint16_t y, uint16_t width, uint8_t size,
     LCD_ShowString(x, y, width, size, size, (u8 *)text);
 }
 
-/* 整页只在打开菜单时绘制，七个选项从上到下各占一行。 */
+/* 整页只在打开菜单时绘制，八个选项从上到下各占一行。 */
 void Menu_Show(void)
 {
     LCD_Clear(MENU_BACKGROUND);
@@ -51,9 +52,9 @@ void Menu_Show(void)
         const uint16_t y = MENU_TOP + i * MENU_ROW_SPACING;
         const char number[] = {(char)('1' + i), '\0'};
         LCD_Fill(MENU_LEFT, y, MENU_RIGHT, y + MENU_ROW_HEIGHT - 1U, WHITE);
-        LCD_Fill(21, y + 4U, 43, y + 25U, MENU_ACCENT);
-        DrawMenuText(28, y + 7U, 8, 16, number, WHITE, MENU_ACCENT);
-        DrawMenuText(54, y + 7U, 160, 16, menu_entries[i].label, BLACK, WHITE);
+        LCD_Fill(21, y + 3U, 43, y + 22U, MENU_ACCENT);
+        DrawMenuText(28, y + 5U, 8, 16, number, WHITE, MENU_ACCENT);
+        DrawMenuText(54, y + 5U, 160, 16, menu_entries[i].label, BLACK, WHITE);
     }
     DrawMenuText(14, 302, 210, 12, "KEY0 returns to this menu", MENU_HEADER, MENU_BACKGROUND);
 }
